@@ -12,14 +12,13 @@ locals {
     HORIZON_DRIVER         = "horizon"
     API_RUN_MIGRATIONS     = "false"
     WORKER_RUN_MIGRATIONS  = "false"
-    AEGIS_SSM_PREFIX       = local.ssm_prefix
     CORS_ALLOWED_ORIGINS   = var.cors_allowed_origins
     FIREBASE_PROJECT_ID    = var.firebase_project_id
     BEDROCK_MODEL_ID       = var.bedrock_model_id
     AEGIS_ARTIFACTS_BUCKET = aws_s3_bucket.artifacts.bucket
 
     BEDROCK_FALLBACK_MODEL_ID = var.bedrock_fallback_model_id
-    AEGIS_FIXTURES_DIR     = "/app/tests/fixtures"
+    AEGIS_FIXTURES_DIR        = "/app/tests/fixtures"
 
     POSTGRES_HOST     = aws_rds_cluster.this.endpoint
     POSTGRES_PORT     = "5432"
@@ -165,6 +164,7 @@ resource "aws_lambda_function" "api" {
   environment {
     variables = merge(local.runtime_env, {
       API_RUNTIME             = "lambda"
+      AEGIS_SSM_PREFIX        = "${local.ssm_prefix}/api"
       AWS_DUALSTACK_ENDPOINTS = "true"
       POSTGRES_POOL_MIN       = "1"
       POSTGRES_POOL_MAX       = "3"
@@ -207,6 +207,7 @@ resource "aws_lambda_function" "sweep" {
   environment {
     variables = merge(local.runtime_env, {
       API_RUNTIME             = "lambda"
+      AEGIS_SSM_PREFIX        = "${local.ssm_prefix}/api"
       AWS_DUALSTACK_ENDPOINTS = "true"
       POSTGRES_POOL_MIN       = "1"
       POSTGRES_POOL_MAX       = "2"
@@ -254,7 +255,8 @@ resource "aws_ecs_task_definition" "worker" {
     # One job per task, then exit: the task is billed only while it works.
     command = ["python", "-m", "aegis.worker.main", "--once", "--max-seconds", tostring(var.worker_max_seconds)]
     environment = [for key, value in merge(local.runtime_env, {
-      AWS_REGION = var.aws_region
+      AWS_REGION       = var.aws_region
+      AEGIS_SSM_PREFIX = "${local.ssm_prefix}/api,${local.ssm_prefix}/worker"
     }) : { name = key, value = value }]
     stopTimeout = 120
     logConfiguration = {

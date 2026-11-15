@@ -5,7 +5,13 @@ locals {
   # Runtime secrets live in SSM Parameter Store under this path. Terraform never
   # sees their values: they are written out-of-band and read at cold start.
   ssm_prefix = "/${local.name}"
-  ssm_arn    = "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_prefix}/*"
+  # Least privilege by path: the API and sweep read only /api (ingest token,
+  # Firebase identity); model-provider keys live under /worker and are readable
+  # by investigation workers alone.
+  ssm_api_arn     = "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_prefix}/api/*"
+  ssm_worker_arn  = "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_prefix}/worker/*"
+  ssm_api_path    = "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_prefix}/api"
+  ssm_worker_path = "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_prefix}/worker"
   # The runtime database role created by `migrate_cli` (IAM-authenticated, DML only).
   app_db_role = "aegis_app"
   rds_connect = "arn:aws:rds-db:${var.aws_region}:${local.account_id}:dbuser:${aws_rds_cluster.this.cluster_resource_id}/${local.app_db_role}"
@@ -219,7 +225,7 @@ data "aws_iam_policy_document" "lambda_runtime" {
     sid       = "ReadRuntimeSecrets"
     effect    = "Allow"
     actions   = ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"]
-    resources = [local.ssm_arn, "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_prefix}"]
+    resources = [local.ssm_api_arn, local.ssm_api_path]
   }
   statement {
     sid       = "DecryptRuntimeSecrets"
@@ -332,10 +338,13 @@ resource "aws_iam_role" "worker_runtime" {
 
 data "aws_iam_policy_document" "worker_runtime" {
   statement {
-    sid       = "ReadRuntimeSecrets"
-    effect    = "Allow"
-    actions   = ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"]
-    resources = [local.ssm_arn, "arn:aws:ssm:${var.aws_region}:${local.account_id}:parameter${local.ssm_prefix}"]
+    sid     = "ReadRuntimeSecrets"
+    effect  = "Allow"
+    actions = ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"]
+    resources = [
+      local.ssm_api_arn, local.ssm_api_path,
+      local.ssm_worker_arn, local.ssm_worker_path,
+    ]
   }
   statement {
     sid       = "DecryptRuntimeSecrets"

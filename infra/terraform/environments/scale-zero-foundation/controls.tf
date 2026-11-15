@@ -174,28 +174,8 @@ resource "aws_budgets_budget" "monthly" {
   }
 }
 
-resource "aws_ce_anomaly_monitor" "services" {
-  name              = "${local.name}-services"
-  monitor_type      = "DIMENSIONAL"
-  monitor_dimension = "SERVICE"
-}
-
-resource "aws_ce_anomaly_subscription" "email" {
-  count            = var.alert_email == "" ? 0 : 1
-  name             = "${local.name}-anomalies"
-  frequency        = "DAILY"
-  monitor_arn_list = [aws_ce_anomaly_monitor.services.arn]
-
-  subscriber {
-    type    = "EMAIL"
-    address = var.alert_email
-  }
-
-  threshold_expression {
-    dimension {
-      key           = "ANOMALY_TOTAL_IMPACT_ABSOLUTE"
-      match_options = ["GREATER_THAN_OR_EQUAL"]
-      values        = ["5"]
-    }
-  }
-}
+# Cost anomaly detection: this account already has its single allowed
+# dimensional monitor (AWS permits one per type), so none is created here. The
+# budget above and the hard bounds in the application are the controls this
+# environment owns; attach an alert subscription to the existing monitor from the
+# Billing console if daily anomaly e-mails are wanted.

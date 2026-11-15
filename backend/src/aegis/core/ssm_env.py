@@ -20,10 +20,13 @@ _MAX_PARAMETERS = 50
 
 def bootstrap_environment() -> list[str]:
     """Entry-point hook: load ``AEGIS_SSM_PREFIX`` parameters when configured."""
-    prefix = os.environ.get("AEGIS_SSM_PREFIX", "")
-    if not prefix:
-        return []
-    return load_ssm_environment(prefix, region=os.environ.get("AWS_REGION", "us-east-1"))
+    # Comma-separated so a component loads only the paths its IAM role may read:
+    # the API role sees /api, the worker role /api and /worker (model keys).
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    loaded: list[str] = []
+    for prefix in filter(None, (p.strip() for p in os.environ.get("AEGIS_SSM_PREFIX", "").split(","))):
+        loaded += load_ssm_environment(prefix, region=region)
+    return loaded
 
 
 def load_ssm_environment(prefix: str, *, region: str, client: Any | None = None) -> list[str]:
