@@ -24,4 +24,8 @@ WORKDIR /app
 COPY migrations ./migrations
 COPY tests/fixtures ./tests/fixtures
 
+# Lambda runs the function unprivileged regardless; stating it also keeps image
+# scanners honest. The installed packages and /app are world-readable.
+USER 10001
+
 CMD ["aegis.api.lambda_handler.handler"]

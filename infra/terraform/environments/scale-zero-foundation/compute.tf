@@ -51,6 +51,8 @@ locals {
 # --------------------------------------------------------------------------- #
 
 #checkov:skip=CKV_AWS_51:Tags are mutable on purpose; the release workflow tags each build with its commit and moves `latest`.
+# Reviewed: tags are mutable on purpose (release moves latest); role trust is pinned to the reviewed workflow. See docs/scale-zero-runbook.md section 6.
+#trivy:ignore:AWS-0031
 resource "aws_ecr_repository" "backend" {
   #checkov:skip=CKV_AWS_51:Tags are mutable on purpose; the release workflow tags each build with its commit and moves `latest`.
   name                 = "${local.name}/backend"
@@ -66,6 +68,8 @@ resource "aws_ecr_repository" "backend" {
 }
 
 #checkov:skip=CKV_AWS_51:Tags are mutable on purpose; the release workflow tags each build with its commit and moves `latest`.
+# Reviewed: tags are mutable on purpose (release moves latest); role trust is pinned to the reviewed workflow. See docs/scale-zero-runbook.md section 6.
+#trivy:ignore:AWS-0031
 resource "aws_ecr_repository" "lambda" {
   #checkov:skip=CKV_AWS_51:Tags are mutable on purpose; the release workflow tags each build with its commit and moves `latest`.
   name                 = "${local.name}/lambda"

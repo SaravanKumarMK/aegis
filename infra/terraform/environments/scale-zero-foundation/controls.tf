@@ -6,6 +6,8 @@
 # --------------------------------------------------------------------------- #
 
 #checkov:skip=CKV_AWS_26:CloudWatch alarms cannot publish to a topic encrypted with the AWS-managed SNS key, and the payload carries no data beyond alarm names.
+# Reviewed: CloudWatch cannot publish to a topic encrypted with the AWS-managed key, and a customer key would need a key policy for the alarm service principals. The payload is alarm names only.
+#trivy:ignore:AWS-0095
 resource "aws_sns_topic" "alarms" {
   #checkov:skip=CKV_AWS_26:CloudWatch alarms cannot publish to a topic encrypted with the AWS-managed SNS key, and the payload carries no data beyond alarm names.
   name = "${local.name}-alarms"
