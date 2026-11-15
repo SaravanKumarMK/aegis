@@ -208,6 +208,49 @@ async def test_app_role_gets_data_access_but_cannot_change_the_schema(db: Databa
         await db.execute(f"DROP ROLE IF EXISTS {role}")
 
 
+async def test_orphaned_dispatch_is_rearmed_only_after_a_worker_could_have_booted(
+    db: Database, clean_incident: str
+) -> None:
+    queue = JobQueue(db)
+    outbox = DispatchOutbox(db)
+    job_id = await queue.enqueue(incident_id=clean_incident, kind="orphan_test")
+    assert job_id is not None
+    await _dispatch_once(db, job_id)
+
+    # Just dispatched: a worker may be starting, so recovery must leave it alone.
+    await outbox.recover_orphaned("postgres")
+    assert (await _outbox(db, job_id))["status"] == "dispatched"
+
+    # Dispatched long ago, job still queued and due: nothing will ever claim it.
+    await db.execute(
+        "UPDATE workflow_dispatch_outbox SET dispatched_at=now()-interval '20 minutes' "
+        "WHERE job_id=$1",
+        job_id,
+    )
+    assert await outbox.recover_orphaned("postgres") >= 1
+    row = await _outbox(db, job_id)
+    assert row["status"] == "pending" and row["generation"] == 1
+
+
+async def test_orphan_recovery_parks_a_job_that_keeps_getting_stranded(
+    db: Database, clean_incident: str
+) -> None:
+    queue = JobQueue(db)
+    job_id = await queue.enqueue(incident_id=clean_incident, kind="orphan_ceiling")
+    assert job_id is not None
+    await _dispatch_once(db, job_id)
+    await db.execute(
+        "UPDATE workflow_dispatch_outbox SET generation=25, "
+        "dispatched_at=now()-interval '20 minutes' WHERE job_id=$1",
+        job_id,
+    )
+
+    await DispatchOutbox(db).recover_orphaned("postgres")
+
+    job = await db.fetchrow("SELECT status FROM workflow_jobs WHERE id=$1", job_id)
+    assert job is not None and job["status"] == "failed"
+
+
 async def test_queue_depth_counts_waiting_and_running_jobs(
     db: Database, clean_incident: str
 ) -> None:

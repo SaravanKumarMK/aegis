@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,9 +14,11 @@ from aegis.worker import main as worker_main
 class EmptyQueue:
     def __init__(self, _: Any) -> None:
         self.claims = 0
+        self.destinations: list[str] = []
 
-    async def claim(self, *_: Any, **__: Any) -> None:
+    async def claim(self, *_: Any, **kwargs: Any) -> None:
         self.claims += 1
+        self.destinations.append(kwargs.get("dispatch_destination", "postgres"))
 
 
 def bare_worker(*, max_jobs: int | None, max_seconds: float | None) -> Any:
@@ -30,6 +33,7 @@ def bare_worker(*, max_jobs: int | None, max_seconds: float | None) -> Any:
     worker._inflight = set()
     worker._db = object()
     worker._deadline = max_seconds
+    worker._settings = SimpleNamespace(workflow_dispatch_backend="step_functions")
     return worker
 
 
@@ -43,6 +47,8 @@ async def test_bounded_worker_exits_immediately_when_there_is_no_work(
     await bare_worker(max_jobs=5, max_seconds=None)._poll_loop()
 
     assert queue.claims == 1
+    # Regression: the worker must claim the destination it was dispatched for.
+    assert queue.destinations == ["step_functions"]
 
 
 @pytest.mark.asyncio

@@ -24,7 +24,8 @@ def bootstrap_environment() -> list[str]:
     # the API role sees /api, the worker role /api and /worker (model keys).
     region = os.environ.get("AWS_REGION", "us-east-1")
     loaded: list[str] = []
-    for prefix in filter(None, (p.strip() for p in os.environ.get("AEGIS_SSM_PREFIX", "").split(","))):
+    raw = os.environ.get("AEGIS_SSM_PREFIX", "")
+    for prefix in filter(None, (p.strip() for p in raw.split(","))):
         loaded += load_ssm_environment(prefix, region=region)
     return loaded
 

@@ -251,6 +251,10 @@ class Worker:
                 job = await queue.claim(
                     self.worker_id,
                     kinds=["investigate", "execute_action", "horizon_resume"],
+                    # A job belongs to the orchestrator that dispatched it. Without
+                    # this a Step Functions worker looks for 'postgres' jobs, finds
+                    # none and exits, stranding the job it was started for.
+                    dispatch_destination=self._settings.workflow_dispatch_backend,
                 )
             except Exception as exc:  # noqa: BLE001
                 # A database blip must not kill the worker; back off and retry.

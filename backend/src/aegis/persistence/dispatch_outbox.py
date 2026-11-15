@@ -176,6 +176,52 @@ class DispatchOutbox:
         )
         return None if seconds is None else max(0.0, float(seconds))
 
+    async def recover_orphaned(self, destination: str, *, older_than_s: int = 600) -> int:
+        """Re-arm dispatches whose orchestrator finished but whose job never ran.
+
+        A job can sit 'queued' behind a dispatch marked 'dispatched' when the
+        execution died before its worker started, or the worker found nothing to
+        claim. Nothing else would ever start another worker for it. Rows are only
+        touched after ``older_than_s`` (longer than a worker takes to boot), and
+        past the generation ceiling the job is parked for an operator instead, so
+        recovery can never turn into an unbounded loop of paid tasks.
+        """
+        # Two literal statements (no string building): the shared predicate is
+        # repeated deliberately so every value stays a bound parameter.
+        await self._db.execute(
+            """
+            UPDATE workflow_jobs SET status='failed', updated_at=now(),
+                   last_error='redispatch ceiling reached without completing'
+             WHERE id IN (
+                SELECT j.id FROM workflow_dispatch_outbox o JOIN workflow_jobs j ON j.id = o.job_id
+                 WHERE o.destination = $1 AND o.status = 'dispatched'
+                   AND o.dispatched_at < now() - make_interval(secs => $2)
+                   AND j.status = 'queued' AND j.run_after <= now()
+                   AND o.generation >= 25)
+            """,
+            destination,
+            older_than_s,
+        )
+        result = await self._db.execute(
+            """
+            UPDATE workflow_dispatch_outbox SET status='pending', generation=generation+1,
+                   attempts=0, locked_by=NULL, locked_at=NULL, external_ref=NULL,
+                   last_error=NULL, run_after=now(), dispatched_at=NULL, updated_at=now()
+             WHERE id IN (
+                SELECT o.id FROM workflow_dispatch_outbox o JOIN workflow_jobs j ON j.id = o.job_id
+                 WHERE o.destination = $1 AND o.status = 'dispatched'
+                   AND o.dispatched_at < now() - make_interval(secs => $2)
+                   AND j.status = 'queued' AND j.run_after <= now()
+                   AND o.generation < 25)
+            """,
+            destination,
+            older_than_s,
+        )
+        count = int(result.split()[-1]) if result.startswith("UPDATE") else 0
+        if count:
+            log.warning("re-armed orphaned workflow dispatches", count=count)
+        return count
+
     async def recover_stale(self, *, older_than_s: int = DISPATCH_LEASE_SECONDS) -> int:
         """Requeue dispatches whose owner died before recording the result."""
         result = await self._db.execute(

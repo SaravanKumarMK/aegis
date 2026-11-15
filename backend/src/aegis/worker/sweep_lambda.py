@@ -56,8 +56,10 @@ async def run_sweep(event: dict[str, Any], *, resume_budget_s: float = 40.0) -> 
     await _connect(db, resume_budget_s)
     try:
         reaped = await JobQueue(db).reap_stale()
+        outbox = DispatchOutbox(db)
+        orphaned = await outbox.recover_orphaned(settings.workflow_dispatch_backend)
         dispatcher = WorkflowDispatcher(
-            DispatchOutbox(db),
+            outbox,
             build_dispatch_adapter(settings),
             max_in_flight=settings.workflow_max_in_flight,
         )
@@ -68,8 +70,19 @@ async def run_sweep(event: dict[str, Any], *, resume_budget_s: float = 40.0) -> 
     finally:
         await db.close()
     retry_in_s = None if wait_s is None else min(_MAX_RETRY_WAIT_S, max(1, math.ceil(wait_s)))
-    log.info("dispatch sweep complete", reaped=reaped, dispatched=dispatched, retry_in_s=retry_in_s)
-    return {"reaped": reaped, "dispatched": dispatched, "retry_in_s": retry_in_s}
+    log.info(
+        "dispatch sweep complete",
+        reaped=reaped,
+        orphaned=orphaned,
+        dispatched=dispatched,
+        retry_in_s=retry_in_s,
+    )
+    return {
+        "reaped": reaped,
+        "orphaned": orphaned,
+        "dispatched": dispatched,
+        "retry_in_s": retry_in_s,
+    }
 
 
 def handler(event: dict[str, Any] | None, _context: object) -> dict[str, Any]:
