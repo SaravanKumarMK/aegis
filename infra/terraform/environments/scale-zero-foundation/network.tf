@@ -13,10 +13,19 @@ locals {
 #checkov:skip=CKV2_AWS_11:Flow logs and their finite-retention destination are created with Phase 4 observability.
 resource "aws_vpc" "this" {
   #checkov:skip=CKV2_AWS_11:Flow logs and finite retention are added with Phase 4 observability before deployment.
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = { Name = "${local.name}-vpc" }
+  cidr_block                       = var.vpc_cidr
+  assign_generated_ipv6_cidr_block = true
+  enable_dns_support               = true
+  enable_dns_hostnames             = true
+  tags                             = { Name = "${local.name}-vpc" }
+}
+
+# Outbound-only IPv6 is the no-cost replacement for a NAT gateway: the API
+# Lambda lives in the data subnets (it needs Aurora) and still reaches Google's
+# token certificates and AWS dual-stack endpoints. Nothing can connect inward.
+resource "aws_egress_only_internet_gateway" "data" {
+  vpc_id = aws_vpc.this.id
+  tags   = { Name = "${local.name}-data-egress-v6" }
 }
 
 resource "aws_default_security_group" "this" {
@@ -40,13 +49,15 @@ resource "aws_subnet" "worker" {
 }
 
 resource "aws_subnet" "data" {
-  for_each = { for index, az in var.availability_zones : az => local.private_data_cidrs[index] }
+  for_each = { for index, az in var.availability_zones : az => index }
 
-  vpc_id                  = aws_vpc.this.id
-  availability_zone       = each.key
-  cidr_block              = each.value
-  map_public_ip_on_launch = false
-  tags                    = { Name = "${local.name}-data-${each.key}", tier = "private-data" }
+  vpc_id                          = aws_vpc.this.id
+  availability_zone               = each.key
+  cidr_block                      = local.private_data_cidrs[each.value]
+  ipv6_cidr_block                 = cidrsubnet(aws_vpc.this.ipv6_cidr_block, 8, each.value + 8)
+  assign_ipv6_address_on_creation = true
+  map_public_ip_on_launch         = false
+  tags                            = { Name = "${local.name}-data-${each.key}", tier = "private-data" }
 }
 
 resource "aws_route_table" "worker" {
@@ -70,6 +81,13 @@ resource "aws_route_table" "data" {
   for_each = aws_subnet.data
   vpc_id   = aws_vpc.this.id
   tags     = { Name = "${local.name}-data-${each.key}" }
+}
+
+resource "aws_route" "data_egress_v6" {
+  for_each                    = aws_route_table.data
+  route_table_id              = each.value.id
+  destination_ipv6_cidr_block = "::/0"
+  egress_only_gateway_id      = aws_egress_only_internet_gateway.data.id
 }
 
 resource "aws_route_table_association" "data" {
@@ -115,6 +133,15 @@ resource "aws_security_group" "lambda" {
   description = "Future API Lambda: no ingress; database and private AWS endpoints only."
   vpc_id      = aws_vpc.this.id
   tags        = { Name = "${local.name}-lambda" }
+}
+
+resource "aws_vpc_security_group_egress_rule" "lambda_https_v6" {
+  security_group_id = aws_security_group.lambda.id
+  description       = "TLS over IPv6 to Google token certificates and AWS dual-stack APIs"
+  cidr_ipv6         = "::/0"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
 }
 
 resource "aws_vpc_security_group_egress_rule" "lambda_postgres" {

@@ -5,6 +5,7 @@ import type {
 // A deliberate import cycle: `war-room/sse` reads the token and the base URL
 // from this module. Neither side touches the other at load time, only inside
 // functions, so evaluation order cannot leave a binding undefined when used.
+import { openPoll, parseIncidentPage, pollingEnabled } from './war-room/poll';
 import { openStream } from './war-room/sse';
 
 /**
@@ -261,19 +262,27 @@ export function subscribeIncident(
   incidentId: string,
   onEvent: (type: string, data: unknown) => void,
 ): () => void {
-  return openStream({
-    path: `/v1/incidents/${encodeURIComponent(incidentId)}/stream`,
-    onFrame: (frame) => {
-      if (!INCIDENT_EVENT_TYPES.has(frame.event)) return;
-      try {
-        onEvent(frame.event, JSON.parse(frame.data));
-      } catch {
-        // A malformed frame - or a throwing subscriber - is dropped here. Left
-        // to reach the stream reader, it would tear down a healthy connection.
-      }
-    },
-    // Connection state is not part of this function's contract; the page
-    // reconciles from its queries whether or not the stream is live.
-    onStatus: () => {},
-  });
+  const onFrame = (frame: { event: string; data: string }) => {
+    if (!INCIDENT_EVENT_TYPES.has(frame.event)) return;
+    try {
+      onEvent(frame.event, JSON.parse(frame.data));
+    } catch {
+      // A malformed frame - or a throwing subscriber - is dropped here. Left
+      // to reach the stream reader, it would tear down a healthy connection.
+    }
+  };
+  // Connection state is not part of this function's contract; the page
+  // reconciles from its queries whether or not the stream is live.
+  const onStatus = () => {};
+  const id = encodeURIComponent(incidentId);
+  // Replayable polling where the gateway cannot stream (scale-to-zero API).
+  if (pollingEnabled()) {
+    return openPoll({
+      path: (after) => `/v1/incidents/${id}/events?after=${after}&limit=100`,
+      parse: parseIncidentPage,
+      onFrame,
+      onStatus,
+    });
+  }
+  return openStream({ path: `/v1/incidents/${id}/stream`, onFrame, onStatus });
 }

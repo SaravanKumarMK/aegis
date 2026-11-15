@@ -511,8 +511,8 @@ class Settings(BaseSettings):
             problems.append("alert_ingest_token is required in production")
         if not self.firebase_project_id:
             problems.append("firebase_project_id is required in production")
-        if not self.postgres_password.get_secret_value():
-            problems.append("postgres_password is required in production")
+        if not self.postgres_password.get_secret_value() and not self.postgres_iam_auth:
+            problems.append("postgres_password (or postgres_iam_auth) is required in production")
         if problems:
             raise ValueError("; ".join(problems))
         return self
