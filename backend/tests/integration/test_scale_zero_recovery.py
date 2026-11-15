@@ -195,6 +195,13 @@ async def test_app_role_gets_data_access_but_cannot_change_the_schema(db: Databa
                 await conn.execute("CREATE TABLE aegis_it_forbidden (id int)")
             with pytest.raises(asyncpg.InsufficientPrivilegeError):
                 await conn.execute("DROP TABLE workflow_jobs")
+            # Immutable audit history and the migration ledger stay out of reach.
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await conn.execute("UPDATE audit_log SET actor = actor WHERE false")
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await conn.execute("DELETE FROM audit_log WHERE false")
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await conn.execute("DELETE FROM schema_migrations WHERE false")
             await conn.execute("RESET ROLE")
     finally:
         await db.execute(f"DROP OWNED BY {role}")

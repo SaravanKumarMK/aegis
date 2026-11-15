@@ -42,6 +42,13 @@ async def grant_app_role(db: Database, role: str) -> None:
         )
         await conn.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {quoted}")
         await conn.execute(f"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {quoted}")
+        # The audit history is append-only and the migration ledger belongs to the
+        # migration owner: a compromised runtime credential must not be able to
+        # rewrite either, whatever the blanket grant above says.
+        await conn.execute(f"REVOKE UPDATE, DELETE, TRUNCATE ON audit_log FROM {quoted}")
+        await conn.execute(
+            f"REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON schema_migrations FROM {quoted}"
+        )
         await conn.execute(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE "
             f"ON TABLES TO {quoted}"
