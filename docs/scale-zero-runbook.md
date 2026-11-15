@@ -132,7 +132,28 @@ attempts per job; redispatch ceiling 25; Aurora ≤2 ACU; 14-day log retention;
 
 ## 4. Evidence from the live deployment
 
-See §6 for the verification log (filled in from the live environment).
+Measured on the deployed `zero` environment on 2026-11-15/16 (UTC), with synthetic
+alerts only (`environment=scale-zero-test`, no remediation, autonomy off):
+
+| Check | Result |
+|---|---|
+| API cold start (first request after an image update) | 19.2 s for `/health/live`; 10.8 s on a later cold start; warm ≈ 1.0–1.6 s |
+| Database reached through the VPC with IAM auth | `/health` reports `postgres: healthy` |
+| Auth boundary | `/v1/incidents` without a token → 401; alert with a wrong ingest token → 401 |
+| Alert ingestion | first alert → 202, one incident, one job; same `external_id` again → 200 `deduplicated`, no second job |
+| Dispatch | the API's inline kick started Step Functions execution `job_<id>`; a Fargate worker ran and exited; no ECS task remained afterwards |
+| Real investigation | the worker used Bedrock (primary model 403 in this account, fallback `claude-sonnet-4-6` answered), recorded Tempo/Neo4j/Prometheus/GitHub as *unavailable*, and settled in `ESCALATED` (abstained) or `AWAITING_APPROVAL` — never a fabricated success |
+| Approval pause | the run that reached `AWAITING_APPROVAL` ended its worker; no task stayed alive waiting |
+| Defect found live and fixed | a Step Functions worker claimed the default `postgres` destination and found no work; the orphan sweep re-armed the stranded job (generations `-g1`…`-g4` all succeeded) — see tests in §1 |
+| Time-sliced continuation | an investigation spanned four workers from its checkpoints (fixed afterwards so a single worker keeps its job for the whole slice) |
+| **Aurora pause** | capacity held at 0.5 ACU until the last activity (21:43Z) plus ≈ 16 min, then **0.0 ACU at 21:59Z** (CloudWatch `ServerlessDatabaseCapacity`) |
+| **Cold resume from pause** | first request 16.2 s and honestly reported `unavailable` while Postgres woke; the next request was healthy (4.5 s) with no lost writes |
+
+Not verified live: a worker killed mid-job (covered by integration tests and the
+lease/reaper design, not by a live kill), the 24 h / 7 d / 30 d idle drills (the pause
+mechanism is verified at ≈ 16 min; longer idle only repeats it), the authenticated
+browser flows (no Firebase test credentials were available), a Spot-style task
+interruption, and the cutover itself.
 
 ## 5. Operating it
 
