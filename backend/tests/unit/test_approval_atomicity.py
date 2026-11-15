@@ -85,6 +85,7 @@ async def test_enqueue_failure_rolls_back_decision_and_audit() -> None:
             DecisionRequest(decision="approved", note=""),
             principal,
             container,
+            SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),  # type: ignore[arg-type]
         )
 
     assert db.rolled_back
@@ -120,6 +121,7 @@ async def test_duplicate_active_job_rolls_back_new_approval_decision() -> None:
             DecisionRequest(decision="approved", note=""),
             principal,
             container,
+            SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),  # type: ignore[arg-type]
         )
 
     assert db.rolled_back

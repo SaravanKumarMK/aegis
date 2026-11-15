@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
 from aegis.api.deps import (
@@ -31,6 +31,7 @@ from aegis.core.logging import get_logger
 from aegis.persistence.audit import AuditEvent
 from aegis.persistence.jobs import JobQueue
 from aegis.policy.tiers import profile_for
+from aegis.worker.kick import kick_dispatch
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/approvals", tags=["governance"])
@@ -132,6 +133,7 @@ async def decide(
     body: DecisionRequest,
     principal: RequireApprover,
     container: ContainerDep,
+    request: Request,
 ) -> dict[str, Any]:
     """Record the decision, then enqueue work - never execute inline.
 
@@ -223,6 +225,9 @@ async def decide(
                     context={"approval_id": approval_id},
                 )
             enqueued = job_id is not None
+
+    if enqueued:
+        await kick_dispatch(request.app.state)
 
     approval = await container.approvals.get(approval_id)
     if approval is None:

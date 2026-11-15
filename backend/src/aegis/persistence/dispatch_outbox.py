@@ -24,6 +24,13 @@ class DispatchRecord:
     attempts: int
     max_attempts: int
     lease_version: int
+    # Which dispatch of the job this is: 0 for the first, +1 each time the job
+    # returns to the queue (migration 013). Part of the external idempotency key.
+    generation: int = 0
+
+    @property
+    def execution_name(self) -> str:
+        return self.job_id if self.generation == 0 else f"{self.job_id}-g{self.generation}"
 
 
 class DispatchOutbox:
@@ -53,7 +60,7 @@ class DispatchOutbox:
               FROM next
              WHERE o.id = next.id
          RETURNING o.id, o.job_id, o.incident_id, o.destination,
-                   o.attempts, o.max_attempts, o.lease_version,
+                   o.attempts, o.max_attempts, o.lease_version, o.generation,
                    (SELECT kind FROM workflow_jobs WHERE id = o.job_id) AS kind,
                    (SELECT payload FROM workflow_jobs WHERE id = o.job_id) AS payload
             """,
@@ -110,6 +117,38 @@ class DispatchOutbox:
             lease_version,
         )
         return result == "UPDATE 1"
+
+    async def in_flight(self, destination: str) -> int:
+        """Dispatches handed to the orchestrator whose job has not finished.
+
+        This is the number of workers that exist or are about to, so it is what
+        the global concurrency cap bounds.
+        """
+        count = await self._db.fetchval(
+            """
+            SELECT count(*) FROM workflow_dispatch_outbox o
+              JOIN workflow_jobs j ON j.id = o.job_id
+             WHERE o.destination = $1 AND o.status = 'dispatched'
+               AND j.status IN ('queued', 'running')
+            """,
+            destination,
+        )
+        return int(count or 0)
+
+    async def next_due_in_s(self, destination: str) -> float | None:
+        """Seconds until the earliest pending dispatch that is not yet due.
+
+        Lets the orchestrator wait out a retry backoff instead of polling.
+        """
+        seconds = await self._db.fetchval(
+            """
+            SELECT EXTRACT(EPOCH FROM (min(run_after) - now()))
+              FROM workflow_dispatch_outbox
+             WHERE destination = $1 AND status = 'pending' AND run_after > now()
+            """,
+            destination,
+        )
+        return None if seconds is None else max(0.0, float(seconds))
 
     async def recover_stale(self, *, older_than_s: int = DISPATCH_LEASE_SECONDS) -> int:
         """Requeue dispatches whose owner died before recording the result."""

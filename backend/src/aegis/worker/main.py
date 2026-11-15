@@ -152,7 +152,8 @@ class Worker:
         )
 
         await self._container.connect()
-        await run_migrations(self._db)
+        if s.worker_run_migrations:
+            await run_migrations(self._db)
 
         unavailable = [
             name for name, cap in self._container.capabilities.items() if not cap.configured
@@ -199,7 +200,7 @@ class Worker:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
                 try:
-                    released = await JobQueue(self._db).reclaim_own(self.worker_id)
+                    released = await JobQueue(self._db).release_own(self.worker_id)
                     log.warning("released unfinished jobs on shutdown", jobs=released)
                 except Exception as exc:  # noqa: BLE001 - shutdown must continue
                     log.exception(

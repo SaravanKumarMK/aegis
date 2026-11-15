@@ -148,14 +148,14 @@ async def test_memory_card_upsert_keeps_the_image(
     path = await s.save_incident_map(card_id, image, "image/png")
     assert path == f"/v1/war-room/incident-maps/{card_id}"
 
-    assert await s.get_incident_map(card_id) == (image, "image/png")
+    assert await s.get_incident_map(card_id) == (image, "image/png", incident_id)
     listed = {c.id: c for c in await s.memory_cards(limit=100)}
     assert listed[card_id].image_url == path
     assert listed[card_id].image_status == "ready"
 
     # A later card upsert replaces the card, never the stored image.
     await s.save_memory_card(card.model_copy(update={"lesson": "roll back first"}))
-    assert await s.get_incident_map(card_id) == (image, "image/png")
+    assert await s.get_incident_map(card_id) == (image, "image/png", incident_id)
     listed = {c.id: c for c in await s.memory_cards(limit=100)}
     assert listed[card_id].lesson == "roll back first"
 

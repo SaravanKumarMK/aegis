@@ -67,6 +67,9 @@ class StepFunctionsDispatchAdapter:
             raise ConfigError("boto3 is required for Step Functions dispatch") from exc
         self._client = boto3.session.Session(region_name=self._settings.aws_region).client(
             "stepfunctions",
+            # A VPC-attached Lambda has no IPv4 route to the internet (no NAT
+            # by design); the dual-stack endpoint is reachable over IPv6.
+            endpoint_url=self._settings.dualstack_endpoint("states"),
             config=Config(
                 connect_timeout=self._settings.workflow_dispatch_timeout_s,
                 read_timeout=self._settings.workflow_dispatch_timeout_s,
@@ -81,6 +84,7 @@ class StepFunctionsDispatchAdapter:
                 "job_id": record.job_id,
                 "incident_id": record.incident_id,
                 "kind": record.kind,
+                "generation": record.generation,
                 "payload": record.payload,
             },
             sort_keys=True,
@@ -91,7 +95,7 @@ class StepFunctionsDispatchAdapter:
             try:
                 response = self._aws().start_execution(
                     stateMachineArn=self._settings.step_functions_state_machine_arn,
-                    name=record.job_id,
+                    name=record.execution_name,
                     input=body,
                 )
                 return str(response["executionArn"])
@@ -100,7 +104,7 @@ class StepFunctionsDispatchAdapter:
                 # after the first call landed is success, not a second run.
                 code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
                 if code == "ExecutionAlreadyExists":
-                    return f"step-functions:{record.job_id}"
+                    return f"step-functions:{record.execution_name}"
                 raise ExternalServiceError(
                     "Step Functions start_execution failed",
                     context={"job_id": record.job_id, "error_type": type(exc).__name__},
@@ -120,14 +124,36 @@ class StepFunctionsDispatchAdapter:
 class WorkflowDispatcher:
     """Drain committed outbox rows through one configured adapter."""
 
-    def __init__(self, outbox: DispatchOutbox, adapter: DispatchAdapter) -> None:
+    def __init__(
+        self,
+        outbox: DispatchOutbox,
+        adapter: DispatchAdapter,
+        *,
+        max_in_flight: int | None = None,
+    ) -> None:
         self._outbox = outbox
         self._adapter = adapter
+        # Global worker ceiling. Rows above it stay pending and are released as
+        # earlier executions finish and settle, so a flood costs queue depth,
+        # never an unbounded number of Fargate tasks.
+        self._max_in_flight = max_in_flight
+
+    async def next_due_in_s(self) -> float | None:
+        return await self._outbox.next_due_in_s(self._adapter.destination)
 
     async def dispatch_batch(self, dispatcher_id: str, *, limit: int) -> int:
         await self._outbox.recover_stale()
+        budget = max(1, limit)
+        if self._max_in_flight is not None:
+            capacity = self._max_in_flight - await self._outbox.in_flight(
+                self._adapter.destination
+            )
+            if capacity <= 0:
+                log.info("dispatch deferred at worker concurrency ceiling")
+                return 0
+            budget = min(budget, capacity)
         dispatched = 0
-        for _ in range(max(1, limit)):
+        for _ in range(budget):
             record = await self._outbox.claim(dispatcher_id, self._adapter.destination)
             if record is None:
                 break

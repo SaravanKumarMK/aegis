@@ -143,6 +143,14 @@ class SourceUnavailable(ExternalServiceError):
     http_status = 503
 
 
+class RateLimited(AegisError):
+    """A ceiling that bounds cost or blast radius was reached; the caller may retry."""
+
+    code = "RATE_LIMITED"
+    http_status = 429
+    retryable = True
+
+
 class DatabaseResuming(ExternalServiceError):
     """The serverless database is waking and no authoritative read is possible yet."""
 

@@ -31,9 +31,12 @@ async def _run(args: argparse.Namespace) -> None:
 
     await container.connect()
     try:
-        await run_migrations(container.db)
+        if settings.worker_run_migrations:
+            await run_migrations(container.db)
         dispatcher = WorkflowDispatcher(
-            DispatchOutbox(container.db), build_dispatch_adapter(settings)
+            DispatchOutbox(container.db),
+            build_dispatch_adapter(settings),
+            max_in_flight=settings.workflow_max_in_flight,
         )
         deadline = time.monotonic() + args.max_seconds if args.max_seconds else None
         while not stop.is_set():

@@ -23,6 +23,7 @@ from aegis.core.logging import get_logger
 from aegis.domain.enums import IncidentState
 from aegis.domain.models import Incident
 from aegis.persistence.jobs import JobQueue
+from aegis.worker.kick import kick_dispatch
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/incidents", tags=["incidents"])
@@ -278,6 +279,8 @@ async def reinvestigate(
         kind="investigate",
         payload={"trigger": "manual", "actor": principal.uid, "reason": body.reason},
     )
+    if job_id is not None:
+        await kick_dispatch(request.app.state)
     return {
         "scheduled": job_id is not None,
         "reason": "" if job_id else "an investigation is already pending",

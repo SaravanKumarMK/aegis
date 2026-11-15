@@ -9,7 +9,7 @@ has run fine for months suddenly stops accepting requests.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -28,6 +28,31 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
     # never sprinkle json.loads across the codebase.
     await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
     await conn.set_type_codec("json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
+
+
+def _iam_password_provider(s: Settings) -> Callable[[], str]:
+    """Return a callable that mints a fresh Aurora IAM auth token per connection.
+
+    Tokens last 15 minutes and are produced by local SigV4 signing (no network
+    call), so a paused database and a Lambda without NAT are both unaffected.
+    asyncpg invokes the callable for every new connection, so pool growth after
+    a long idle period never reuses an expired token.
+    """
+    import boto3
+
+    client = boto3.session.Session(region_name=s.aws_region).client("rds")
+
+    def _token() -> str:
+        return str(
+            client.generate_db_auth_token(
+                DBHostname=s.postgres_host,
+                Port=s.postgres_port,
+                DBUsername=s.postgres_user,
+                Region=s.aws_region,
+            )
+        )
+
+    return _token
 
 
 class Database:
@@ -53,13 +78,19 @@ class Database:
         if self._pool is not None:
             return
         s = self._settings
+        password: str | Callable[[], str] = s.postgres_password.get_secret_value()
+        if s.postgres_iam_auth:
+            password = _iam_password_provider(s)
         try:
             self._pool = await asyncpg.create_pool(
                 host=s.postgres_host,
                 port=s.postgres_port,
                 database=s.postgres_db,
                 user=s.postgres_user,
-                password=s.postgres_password.get_secret_value(),
+                password=password,
+                # IAM tokens are only accepted over TLS; Aurora also forces it.
+                ssl="require" if s.postgres_iam_auth else None,
+                timeout=s.postgres_connect_timeout_s,
                 min_size=s.postgres_pool_min,
                 max_size=s.postgres_pool_max,
                 command_timeout=s.postgres_statement_timeout_ms / 1000,
