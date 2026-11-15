@@ -82,8 +82,8 @@ async def _recorded_drain_timeout(
 ) -> float | None:
     seen: list[float | None] = []
 
-    async def fake_wait(  # noqa: ASYNC109 - mirrors asyncio.wait's signature
-        tasks: Any, timeout: float | None = None
+    async def fake_wait(
+        tasks: Any, timeout: float | None = None  # noqa: ASYNC109 - mirrors asyncio.wait
     ) -> tuple[set[Any], set[Any]]:
         seen.append(timeout)
         return set(tasks), set()
