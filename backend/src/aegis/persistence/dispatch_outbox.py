@@ -12,6 +12,14 @@ log = get_logger(__name__)
 
 DISPATCH_LEASE_SECONDS: Final = 120
 
+# 'dispatching' counts: a row mid-hand-off is capacity already spoken for.
+_IN_FLIGHT_SQL: Final = """
+    SELECT count(*) FROM workflow_dispatch_outbox o
+      JOIN workflow_jobs j ON j.id = o.job_id
+     WHERE o.destination = $1 AND o.status IN ('dispatching', 'dispatched')
+       AND j.status IN ('queued', 'running')
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class DispatchRecord:
@@ -41,8 +49,35 @@ class DispatchOutbox:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    async def claim(self, dispatcher_id: str, destination: str) -> DispatchRecord | None:
-        row = await self._db.fetchrow(
+    async def claim(
+        self,
+        dispatcher_id: str,
+        destination: str,
+        *,
+        max_in_flight: int | None = None,
+    ) -> DispatchRecord | None:
+        """Claim the next due row, never letting in-flight work pass the ceiling.
+
+        The count and the claim share one transaction under an advisory lock, and
+        the count includes rows already 'dispatching', so concurrent dispatchers
+        (API kicks, the sweep, a settle) cannot each see spare capacity and
+        together overshoot it.
+        """
+        async with self._db.transaction() as conn:
+            if max_in_flight is not None:
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))", f"dispatch-claim:{destination}"
+                )
+                in_flight = await conn.fetchval(_IN_FLIGHT_SQL, destination)
+                if int(in_flight or 0) >= max_in_flight:
+                    return None
+            return await self._claim_next(conn, dispatcher_id, destination)
+
+    @staticmethod
+    async def _claim_next(
+        conn: Any, dispatcher_id: str, destination: str
+    ) -> DispatchRecord | None:
+        row = await conn.fetchrow(
             """
             WITH next AS (
                 SELECT id FROM workflow_dispatch_outbox
@@ -124,16 +159,7 @@ class DispatchOutbox:
         This is the number of workers that exist or are about to, so it is what
         the global concurrency cap bounds.
         """
-        count = await self._db.fetchval(
-            """
-            SELECT count(*) FROM workflow_dispatch_outbox o
-              JOIN workflow_jobs j ON j.id = o.job_id
-             WHERE o.destination = $1 AND o.status = 'dispatched'
-               AND j.status IN ('queued', 'running')
-            """,
-            destination,
-        )
-        return int(count or 0)
+        return int(await self._db.fetchval(_IN_FLIGHT_SQL, destination) or 0)
 
     async def next_due_in_s(self, destination: str) -> float | None:
         """Seconds until the earliest pending dispatch that is not yet due.

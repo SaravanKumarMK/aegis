@@ -70,15 +70,20 @@ class _Outbox:
     async def recover_stale(self) -> int:
         return 0
 
-    async def in_flight(self, _destination: str) -> int:
-        return self._in_flight
-
     async def next_due_in_s(self, _destination: str) -> float | None:
         return 12.5
 
-    async def claim(self, _id: str, _destination: str) -> DispatchRecord | None:
+    async def claim(
+        self, _id: str, _destination: str, *, max_in_flight: int | None = None
+    ) -> DispatchRecord | None:
         self.claims += 1
-        return self.records.pop(0) if self.records else None
+        # Mirrors the real claim: the ceiling is checked atomically with the claim.
+        if max_in_flight is not None and self._in_flight >= max_in_flight:
+            return None
+        if not self.records:
+            return None
+        self._in_flight += 1
+        return self.records.pop(0)
 
     async def mark_dispatched(self, record_id: str, _ref: str, **_: Any) -> bool:
         self.dispatched.append(record_id)
@@ -107,8 +112,8 @@ async def test_concurrency_ceiling_defers_dispatch_instead_of_starting_workers()
     dispatcher = WorkflowDispatcher(outbox, adapter, max_in_flight=5)  # type: ignore[arg-type]
 
     assert await dispatcher.dispatch_batch("t", limit=10) == 0
-    # Rows were never claimed, so they remain pending for the next settle.
-    assert outbox.claims == 0 and adapter.calls == 0
+    # Nothing was handed to the orchestrator; rows stay pending for the next settle.
+    assert adapter.calls == 0 and len(outbox.records) == 4
 
 
 @pytest.mark.asyncio

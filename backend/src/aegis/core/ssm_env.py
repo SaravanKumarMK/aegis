@@ -18,6 +18,14 @@ from aegis.core.errors import ConfigError
 _MAX_PARAMETERS = 50
 
 
+def bootstrap_environment() -> list[str]:
+    """Entry-point hook: load ``AEGIS_SSM_PREFIX`` parameters when configured."""
+    prefix = os.environ.get("AEGIS_SSM_PREFIX", "")
+    if not prefix:
+        return []
+    return load_ssm_environment(prefix, region=os.environ.get("AWS_REGION", "us-east-1"))
+
+
 def load_ssm_environment(prefix: str, *, region: str, client: Any | None = None) -> list[str]:
     """Populate ``os.environ`` from ``<prefix>/<ENV_NAME>`` parameters.
 

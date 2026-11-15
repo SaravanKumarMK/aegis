@@ -15,14 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import math
-import os
 import time
 from typing import Any
 
 from aegis.core.config import get_settings
 from aegis.core.errors import DatabaseResuming
 from aegis.core.logging import configure_logging, get_logger
-from aegis.core.ssm_env import load_ssm_environment
+from aegis.core.ssm_env import bootstrap_environment
 from aegis.persistence.db import Database
 from aegis.persistence.dispatch_outbox import DispatchOutbox
 from aegis.persistence.jobs import JobQueue
@@ -74,6 +73,5 @@ async def run_sweep(event: dict[str, Any], *, resume_budget_s: float = 40.0) -> 
 
 
 def handler(event: dict[str, Any] | None, _context: object) -> dict[str, Any]:
-    if prefix := os.environ.get("AEGIS_SSM_PREFIX", ""):
-        load_ssm_environment(prefix, region=os.environ.get("AWS_REGION", "us-east-1"))
+    bootstrap_environment()
     return asyncio.run(run_sweep(event or {}))

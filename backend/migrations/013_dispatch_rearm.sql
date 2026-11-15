@@ -15,9 +15,32 @@
 ALTER TABLE workflow_dispatch_outbox
     ADD COLUMN IF NOT EXISTS generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0);
 
+-- Hard ceiling on re-dispatches of one job. Planned releases refund the job's
+-- attempt (a long investigation spans many time-bounded workers), so without
+-- this a job that never advances its checkpoint could cycle forever, one paid
+-- Fargate task per lap. Past the ceiling the job is parked for an operator.
 CREATE OR REPLACE FUNCTION aegis_rearm_dispatch_outbox()
 RETURNS TRIGGER AS $$
+DECLARE
+    current_generation INTEGER;
 BEGIN
+    SELECT generation INTO current_generation
+      FROM workflow_dispatch_outbox
+     WHERE job_id = NEW.id AND status = 'dispatched';
+
+    IF current_generation IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    IF current_generation >= 25 THEN
+        UPDATE workflow_jobs
+           SET status = 'failed',
+               last_error = 'redispatch ceiling reached without completing',
+               updated_at = now()
+         WHERE id = NEW.id;
+        RETURN NEW;
+    END IF;
+
     UPDATE workflow_dispatch_outbox
        SET status        = 'pending',
            generation    = generation + 1,

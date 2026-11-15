@@ -137,6 +137,70 @@ async def test_in_flight_counts_only_dispatched_unfinished_work(
     assert await outbox.in_flight("postgres") == before
 
 
+async def test_concurrent_claims_cannot_overshoot_the_in_flight_ceiling(
+    db: Database, clean_incident: str
+) -> None:
+    import asyncio
+
+    queue = JobQueue(db)
+    outbox = DispatchOutbox(db)
+    for index in range(3):
+        # One live job per (incident, kind), so each needs its own kind.
+        assert await queue.enqueue(incident_id=clean_incident, kind=f"ceiling_{index}")
+
+    ceiling = await outbox.in_flight("postgres") + 1
+    claims = await asyncio.gather(
+        *(outbox.claim(f"d{i}", "postgres", max_in_flight=ceiling) for i in range(3))
+    )
+
+    # Three racing dispatchers, one free slot: exactly one wins.
+    assert sum(record is not None for record in claims) == 1
+
+
+async def test_job_that_never_progresses_is_parked_at_the_redispatch_ceiling(
+    db: Database, clean_incident: str
+) -> None:
+    queue = JobQueue(db)
+    job_id = await queue.enqueue(incident_id=clean_incident, kind="ceiling_loop")
+    assert job_id is not None
+    await _dispatch_once(db, job_id)
+    await db.execute(
+        "UPDATE workflow_dispatch_outbox SET generation=25 WHERE job_id=$1", job_id
+    )
+    claimed = await queue.claim("worker-a", kinds=["ceiling_loop"])
+    assert claimed is not None
+
+    assert await queue.release_own("worker-a") == 1
+
+    job = await db.fetchrow("SELECT status, last_error FROM workflow_jobs WHERE id=$1", job_id)
+    assert job is not None and job["status"] == "failed"
+    assert "ceiling" in str(job["last_error"])
+
+
+async def test_app_role_gets_data_access_but_cannot_change_the_schema(db: Database) -> None:
+    import asyncpg
+
+    from aegis.core.errors import ConfigError
+    from aegis.persistence.migrate_cli import grant_app_role
+
+    role = "aegis_it_app"
+    with pytest.raises(ConfigError):
+        await grant_app_role(db, 'x"; DROP TABLE incidents; --')
+    try:
+        await grant_app_role(db, role)
+        async with db.pool.acquire() as conn:
+            await conn.execute(f"SET ROLE {role}")
+            assert await conn.fetchval("SELECT count(*) FROM workflow_jobs") >= 0
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await conn.execute("CREATE TABLE aegis_it_forbidden (id int)")
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await conn.execute("DROP TABLE workflow_jobs")
+            await conn.execute("RESET ROLE")
+    finally:
+        await db.execute(f"DROP OWNED BY {role}")
+        await db.execute(f"DROP ROLE IF EXISTS {role}")
+
+
 async def test_queue_depth_counts_waiting_and_running_jobs(
     db: Database, clean_incident: str
 ) -> None:

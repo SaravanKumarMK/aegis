@@ -143,18 +143,17 @@ class WorkflowDispatcher:
 
     async def dispatch_batch(self, dispatcher_id: str, *, limit: int) -> int:
         await self._outbox.recover_stale()
-        budget = max(1, limit)
-        if self._max_in_flight is not None:
-            capacity = self._max_in_flight - await self._outbox.in_flight(
-                self._adapter.destination
-            )
-            if capacity <= 0:
-                log.info("dispatch deferred at worker concurrency ceiling")
-                return 0
-            budget = min(budget, capacity)
         dispatched = 0
-        for _ in range(budget):
-            record = await self._outbox.claim(dispatcher_id, self._adapter.destination)
+        for _ in range(max(1, limit)):
+            # The ceiling is enforced inside the claim, atomically with it.
+            if self._max_in_flight is None:
+                record = await self._outbox.claim(dispatcher_id, self._adapter.destination)
+            else:
+                record = await self._outbox.claim(
+                    dispatcher_id,
+                    self._adapter.destination,
+                    max_in_flight=self._max_in_flight,
+                )
             if record is None:
                 break
             try:

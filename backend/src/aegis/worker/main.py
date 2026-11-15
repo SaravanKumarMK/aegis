@@ -36,6 +36,7 @@ from aegis.core.logging import (
     configure_logging,
     get_logger,
 )
+from aegis.core.ssm_env import bootstrap_environment
 from aegis.domain.enums import IncidentState
 from aegis.persistence.db import Database
 from aegis.persistence.incidents import IncidentRepository
@@ -636,6 +637,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 async def _main() -> None:
+    bootstrap_environment()
     args = parser().parse_args()
 
     max_jobs = 1 if args.once else args.max_jobs
