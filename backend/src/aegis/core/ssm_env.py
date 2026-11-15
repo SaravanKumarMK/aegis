@@ -25,12 +25,23 @@ def bootstrap_environment() -> list[str]:
     region = os.environ.get("AWS_REGION", "us-east-1")
     loaded: list[str] = []
     raw = os.environ.get("AEGIS_SSM_PREFIX", "")
+    # Only names the application declares as settings may be set: a parameter
+    # named PYTHONPATH, LD_PRELOAD or AWS_ENDPOINT_URL must never reach the process.
+    from aegis.core.config import Settings
+
+    allowed = {name.upper() for name in Settings.model_fields}
     for prefix in filter(None, (p.strip() for p in raw.split(","))):
-        loaded += load_ssm_environment(prefix, region=region)
+        loaded += load_ssm_environment(prefix, region=region, allowed=allowed)
     return loaded
 
 
-def load_ssm_environment(prefix: str, *, region: str, client: Any | None = None) -> list[str]:
+def load_ssm_environment(
+    prefix: str,
+    *,
+    region: str,
+    client: Any | None = None,
+    allowed: set[str] | None = None,
+) -> list[str]:
     """Populate ``os.environ`` from ``<prefix>/<ENV_NAME>`` parameters.
 
     Returns the names loaded. Fails closed: an unreadable prefix is a boot error,
@@ -51,14 +62,26 @@ def load_ssm_environment(prefix: str, *, region: str, client: Any | None = None)
     loaded: list[str] = []
     try:
         pages = client.get_paginator("get_parameters_by_path").paginate(
-            Path=prefix, WithDecryption=True, PaginationConfig={"MaxItems": _MAX_PARAMETERS}
+            Path=prefix, WithDecryption=True
         )
+        seen = 0
         for page in pages:
             for parameter in page["Parameters"]:
+                seen += 1
+                # A silently truncated list would let a missing setting fall back
+                # to its default (e.g. a disabled control), so too many is fatal.
+                if seen > _MAX_PARAMETERS:
+                    raise ConfigError("too many SSM parameters under the prefix")
                 name = str(parameter["Name"]).rsplit("/", 1)[-1].upper()
+                if allowed is not None and name not in allowed:
+                    raise ConfigError(
+                        "SSM parameter is not a declared setting", context={"parameter": name}
+                    )
                 if name not in os.environ:
                     os.environ[name] = str(parameter["Value"])
                     loaded.append(name)
+    except ConfigError:
+        raise
     except Exception as exc:
         raise ConfigError(
             "could not read deployment secrets from SSM",

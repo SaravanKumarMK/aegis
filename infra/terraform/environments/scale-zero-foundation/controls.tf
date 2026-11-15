@@ -37,6 +37,11 @@ data "aws_iam_policy_document" "alarms_topic" {
       type        = "Service"
       identifiers = ["budgets.amazonaws.com", "costalerts.amazonaws.com"]
     }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [local.account_id]
+    }
   }
 }
 
@@ -179,3 +184,54 @@ resource "aws_budgets_budget" "monthly" {
 # budget above and the hard bounds in the application are the controls this
 # environment owns; attach an alert subscription to the existing monitor from the
 # Billing console if daily anomaly e-mails are wanted.
+
+# Application-level warnings that mean work may be waiting without a worker. The
+# app has no metrics backend in this environment, so they are read from the logs.
+locals {
+  log_alarms = {
+    inline-dispatch-incomplete = {
+      group   = aws_cloudwatch_log_group.api.name
+      pattern = "\"inline dispatch did not complete\""
+      note    = "A committed job was not handed to Step Functions inline; the 6-hourly sweep is now its only recovery."
+    }
+    orphaned-dispatch-rearmed = {
+      group   = aws_cloudwatch_log_group.sweep.name
+      pattern = "\"re-armed orphaned workflow dispatches\""
+      note    = "The sweep found a dispatch whose job never ran; a worker failed before claiming it."
+    }
+    job-parked-at-ceiling = {
+      group   = aws_cloudwatch_log_group.sweep.name
+      pattern = "\"parked jobs at the redispatch ceiling\""
+      note    = "A job used all of its redispatches and needs an operator."
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "app" {
+  for_each       = local.log_alarms
+  name           = "${local.name}-${each.key}"
+  log_group_name = each.value.group
+  pattern        = each.value.pattern
+
+  metric_transformation {
+    name      = each.key
+    namespace = "Aegis/${local.name}"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "app" {
+  for_each            = local.log_alarms
+  alarm_name          = "${local.name}-${each.key}"
+  alarm_description   = each.value.note
+  namespace           = "Aegis/${local.name}"
+  metric_name         = each.key
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_actions
+  depends_on          = [aws_cloudwatch_log_metric_filter.app]
+}

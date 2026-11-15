@@ -56,7 +56,7 @@ data "aws_iam_policy_document" "github_plan" {
     sid       = "ReadState"
     effect    = "Allow"
     actions   = ["s3:GetObject", "s3:ListBucket"]
-    resources = [var.terraform_state_bucket_arn, "${var.terraform_state_bucket_arn}/*"]
+    resources = [var.terraform_state_bucket_arn, "${var.terraform_state_bucket_arn}/scale-zero/*"]
   }
   statement {
     sid       = "LockState"
@@ -102,7 +102,10 @@ resource "aws_iam_role_policy" "github_plan" {
 }
 
 # Release: publish images, repoint the two functions, run the one-off migration.
-# It cannot touch infrastructure, secrets, the database or IAM.
+# It cannot change infrastructure, IAM or secrets. It CAN run the migration task,
+# which runs the pushed image as the database owner, so an image push is a code
+# execution path: the environment, the main-only deployment rule and the
+# job_workflow_ref condition below are what protect it.
 data "aws_iam_policy_document" "github_release_assume" {
   statement {
     effect  = "Allow"
@@ -120,6 +123,13 @@ data "aws_iam_policy_document" "github_release_assume" {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values   = ["repo:${var.github_repository}:environment:scale-zero"]
+    }
+    # Only the reviewed release workflow on main may assume the role, whatever a
+    # branch does to its own copy of the workflow file.
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:job_workflow_ref"
+      values   = ["${var.github_repository}/.github/workflows/deploy-scale-zero.yml@refs/heads/main"]
     }
   }
 }
@@ -461,6 +471,11 @@ data "aws_iam_policy_document" "sfn" {
     effect    = "Allow"
     actions   = ["ecs:StopTask", "ecs:DescribeTasks"]
     resources = ["*"]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [aws_ecs_cluster.this.arn]
+    }
   }
   statement {
     sid       = "HandOverTaskRoles"

@@ -67,9 +67,14 @@ class Settings(BaseSettings):
     postgres_db: str = "aegis"
     postgres_user: str = "aegis"
     postgres_password: SecretStr = SecretStr("")
-    postgres_pool_min: Positive = 2
+    # 0 lets a scale-to-zero API hold no connection while idle, so a frozen Lambda
+    # cannot keep Aurora awake.
+    postgres_pool_min: Annotated[int, Field(ge=0)] = 2
     postgres_pool_max: Positive = 16
     postgres_statement_timeout_ms: Positive = 15_000
+    # Server-side close of idle sessions (0 = off). A frozen Lambda cannot run the
+    # pool's own idle timer, so the database must end the session instead.
+    postgres_idle_session_timeout_ms: Annotated[int, Field(ge=0)] = 0
     # Per-connection connect timeout. A paused Aurora cluster resumes in about
     # 15 s; failing fast turns that into a typed "resuming" response instead of
     # a request that outlives the API gateway's integration timeout.

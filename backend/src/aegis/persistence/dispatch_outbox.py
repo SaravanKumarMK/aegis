@@ -84,6 +84,9 @@ class DispatchOutbox:
                  WHERE destination = $2
                    AND status = 'pending'
                    AND run_after <= now()
+                   AND EXISTS (SELECT 1 FROM workflow_jobs j
+                                WHERE j.id = workflow_dispatch_outbox.job_id
+                                  AND j.status = 'queued')
                  ORDER BY run_after, created_at
                  FOR UPDATE SKIP LOCKED
                  LIMIT 1
@@ -179,44 +182,69 @@ class DispatchOutbox:
     async def recover_orphaned(self, destination: str, *, older_than_s: int = 600) -> int:
         """Re-arm dispatches whose orchestrator finished but whose job never ran.
 
-        A job can sit 'queued' behind a dispatch marked 'dispatched' when the
-        execution died before its worker started, or the worker found nothing to
-        claim. Nothing else would ever start another worker for it. Rows are only
-        touched after ``older_than_s`` (longer than a worker takes to boot), and
-        past the generation ceiling the job is parked for an operator instead, so
-        recovery can never turn into an unbounded loop of paid tasks.
+        A job can sit 'queued' behind a dispatch marked 'dispatched' (or 'failed',
+        after its hand-off attempts ran out) when the execution died before its
+        worker started, or the worker found nothing to claim. Nothing else would
+        ever start another worker for it. Rows are touched only after
+        ``older_than_s`` (longer than a worker takes to boot), and past the
+        generation ceiling the job is parked with an audit record instead, so
+        recovery can never become an unbounded loop of paid tasks.
+
+        Each UPDATE re-checks the row's state in its own WHERE, so a row another
+        process re-armed or claimed meanwhile is skipped rather than overwritten.
         """
-        # Two literal statements (no string building): the shared predicate is
-        # repeated deliberately so every value stays a bound parameter.
-        await self._db.execute(
-            """
-            UPDATE workflow_jobs SET status='failed', updated_at=now(),
-                   last_error='redispatch ceiling reached without completing'
-             WHERE id IN (
-                SELECT j.id FROM workflow_dispatch_outbox o JOIN workflow_jobs j ON j.id = o.job_id
-                 WHERE o.destination = $1 AND o.status = 'dispatched'
-                   AND o.dispatched_at < now() - make_interval(secs => $2)
+        async with self._db.transaction() as conn:
+            parked = await conn.fetch(
+                """
+                UPDATE workflow_jobs j SET status='failed', updated_at=now(),
+                       last_error='redispatch ceiling reached without completing'
+                  FROM workflow_dispatch_outbox o
+                 WHERE o.job_id = j.id AND o.destination = $1
+                   AND o.status IN ('dispatched', 'failed')
+                   AND COALESCE(o.dispatched_at, o.updated_at)
+                       < now() - make_interval(secs => $2)
                    AND j.status = 'queued' AND j.run_after <= now()
-                   AND o.generation >= 25)
-            """,
-            destination,
-            older_than_s,
-        )
-        result = await self._db.execute(
-            """
-            UPDATE workflow_dispatch_outbox SET status='pending', generation=generation+1,
-                   attempts=0, locked_by=NULL, locked_at=NULL, external_ref=NULL,
-                   last_error=NULL, run_after=now(), dispatched_at=NULL, updated_at=now()
-             WHERE id IN (
-                SELECT o.id FROM workflow_dispatch_outbox o JOIN workflow_jobs j ON j.id = o.job_id
-                 WHERE o.destination = $1 AND o.status = 'dispatched'
-                   AND o.dispatched_at < now() - make_interval(secs => $2)
+                   AND o.generation >= 25
+             RETURNING j.id, j.incident_id
+                """,
+                destination,
+                older_than_s,
+            )
+            for job in parked:
+                await conn.execute(
+                    "UPDATE workflow_dispatch_outbox SET status='failed', updated_at=now(), "
+                    "last_error='redispatch ceiling reached without completing' WHERE job_id=$1",
+                    job["id"],
+                )
+                await conn.execute(
+                    "INSERT INTO audit_log (incident_id, actor, actor_type, event_type, "
+                    "resource_type, resource_id, detail) "
+                    "VALUES ($1, 'aegis-dispatch', 'system', 'workflow.job_parked', "
+                    "'workflow_job', $2, $3)",
+                    job["incident_id"],
+                    job["id"],
+                    {"reason": "redispatch ceiling reached", "source": "orphan recovery"},
+                )
+            result = await conn.execute(
+                """
+                UPDATE workflow_dispatch_outbox o
+                   SET status='pending', generation=o.generation+1, attempts=0,
+                       lease_version=o.lease_version+1, locked_by=NULL, locked_at=NULL,
+                       external_ref=NULL, last_error=NULL, run_after=now(),
+                       dispatched_at=NULL, updated_at=now()
+                  FROM workflow_jobs j
+                 WHERE j.id = o.job_id AND o.destination = $1
+                   AND o.status IN ('dispatched', 'failed')
+                   AND COALESCE(o.dispatched_at, o.updated_at)
+                       < now() - make_interval(secs => $2)
                    AND j.status = 'queued' AND j.run_after <= now()
-                   AND o.generation < 25)
-            """,
-            destination,
-            older_than_s,
-        )
+                   AND o.generation < 25
+                """,
+                destination,
+                older_than_s,
+            )
+        if parked:
+            log.error("parked jobs at the redispatch ceiling", count=len(parked))
         count = int(result.split()[-1]) if result.startswith("UPDATE") else 0
         if count:
             log.warning("re-armed orphaned workflow dispatches", count=count)

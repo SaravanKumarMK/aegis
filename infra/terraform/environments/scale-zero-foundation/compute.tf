@@ -166,8 +166,11 @@ resource "aws_lambda_function" "api" {
       API_RUNTIME             = "lambda"
       AEGIS_SSM_PREFIX        = "${local.ssm_prefix}/api"
       AWS_DUALSTACK_ENDPOINTS = "true"
-      POSTGRES_POOL_MIN       = "1"
+      POSTGRES_POOL_MIN       = "0"
       POSTGRES_POOL_MAX       = "3"
+      # A frozen Lambda cannot close its own idle connection, and an open one
+      # keeps Aurora from pausing; the server ends the session instead.
+      POSTGRES_IDLE_SESSION_TIMEOUT_MS = "60000"
     })
   }
 
@@ -206,11 +209,12 @@ resource "aws_lambda_function" "sweep" {
 
   environment {
     variables = merge(local.runtime_env, {
-      API_RUNTIME             = "lambda"
-      AEGIS_SSM_PREFIX        = "${local.ssm_prefix}/api"
-      AWS_DUALSTACK_ENDPOINTS = "true"
-      POSTGRES_POOL_MIN       = "1"
-      POSTGRES_POOL_MAX       = "2"
+      API_RUNTIME                      = "lambda"
+      AEGIS_SSM_PREFIX                 = "${local.ssm_prefix}/api"
+      AWS_DUALSTACK_ENDPOINTS          = "true"
+      POSTGRES_POOL_MIN                = "0"
+      POSTGRES_POOL_MAX                = "2"
+      POSTGRES_IDLE_SESSION_TIMEOUT_MS = "60000"
     })
   }
 

@@ -64,7 +64,32 @@ resource "aws_sfn_state_machine" "investigation" {
       WaitForLease = {
         Type    = "Wait"
         Seconds = 130 # job lease is 120 s
-        Next    = "Settle"
+        Next    = "SettleAfterFailure"
+      }
+      # Same settle, but asking recovery to treat a still-queued dispatch as
+      # orphaned after one minute (the worker is known to be gone), and then ending
+      # the execution as FAILED so the ExecutionsFailed alarm sees worker failures.
+      SettleAfterFailure = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = aws_lambda_function.sweep.arn
+          Payload      = { source = "state-machine-failure", "job_id.$" = "$.job_id", orphan_after_s = 60 }
+        }
+        ResultPath = "$.settle"
+        Retry = [{
+          ErrorEquals     = ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException", "States.TaskFailed"]
+          IntervalSeconds = 15
+          MaxAttempts     = 4
+          BackoffRate     = 2
+        }]
+        Catch = [{ ErrorEquals = ["States.ALL"], ResultPath = "$.settle_error", Next = "WorkerFailed" }]
+        Next  = "WorkerFailed"
+      }
+      WorkerFailed = {
+        Type  = "Fail"
+        Error = "WorkerFailed"
+        Cause = "The worker task failed or timed out; the dispatch was settled and recovery re-armed any stranded job."
       }
       Settle = {
         Type     = "Task"
@@ -193,6 +218,23 @@ resource "aws_apigatewayv2_route" "default" {
   target    = "integrations/${aws_apigatewayv2_integration.api.id}"
 }
 
+# The two routes an incident cannot do without get their own throttle bucket
+# (HTTP API limits apply per route), so a flood of anonymous requests to any other
+# path cannot starve alert ingestion or an approver's decision.
+resource "aws_apigatewayv2_route" "alerts" {
+  #checkov:skip=CKV_AWS_309:Authorization is the application's ingest-token check, run before any database access.
+  api_id    = aws_apigatewayv2_api.this.id
+  route_key = "POST /v1/alerts"
+  target    = "integrations/${aws_apigatewayv2_integration.api.id}"
+}
+
+resource "aws_apigatewayv2_route" "approval_decision" {
+  #checkov:skip=CKV_AWS_309:Authorization is the application's Firebase verification plus approver role check.
+  api_id    = aws_apigatewayv2_api.this.id
+  route_key = "POST /v1/approvals/{approval_id}/decide"
+  target    = "integrations/${aws_apigatewayv2_integration.api.id}"
+}
+
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.this.id
   name        = "$default"
@@ -201,6 +243,18 @@ resource "aws_apigatewayv2_stage" "default" {
   default_route_settings {
     throttling_rate_limit  = var.api_throttle_rate
     throttling_burst_limit = var.api_throttle_burst
+  }
+
+  route_settings {
+    route_key              = aws_apigatewayv2_route.alerts.route_key
+    throttling_rate_limit  = var.api_throttle_rate
+    throttling_burst_limit = var.api_throttle_burst
+  }
+
+  route_settings {
+    route_key              = aws_apigatewayv2_route.approval_decision.route_key
+    throttling_rate_limit  = 2
+    throttling_burst_limit = 4
   }
 
   access_log_settings {

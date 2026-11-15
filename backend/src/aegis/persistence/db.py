@@ -102,6 +102,11 @@ class Database:
                     # Guards against a transaction left open by a crashed caller
                     # holding locks forever.
                     "idle_in_transaction_session_timeout": "30000",
+                    **(
+                        {"idle_session_timeout": str(s.postgres_idle_session_timeout_ms)}
+                        if s.postgres_idle_session_timeout_ms
+                        else {}
+                    ),
                 },
             )
         except (

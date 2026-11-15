@@ -71,9 +71,10 @@ replaced:
   one incident and starts one investigation. Detection latency is the alert source's
   evaluation interval plus roughly 1–20 s (cold API, database resume).
 * **Option B, available but off:** a scheduled one-shot detection pass. It would need a
-  stateless detector (the current one is stateful), and every run wakes Aurora; at a
-  5-minute cadence that alone is about 288 database wake-ups a day (~$4/day), more
-  than the whole previous bill. It is therefore not provisioned.
+  stateless detector (the current one is stateful), and every run wakes Aurora. At a
+  5-minute cadence the database never reaches its 15-minute pause, so it is simply
+  always on: 0.5 ACU × 24 h × $0.12 ≈ $1.44/day ≈ $43/month before any compute. It is
+  therefore not provisioned.
 * **Option C, on demand:** the reference workloads, load generator and fault injection
   are demonstration tooling, not production. They are not deployed in this environment
   and `WORKLOAD_METRICS_TARGETS`, `PROMETHEUS_URL`, `TEMPO_URL`, `LOKI_URL`,
@@ -84,13 +85,17 @@ replaced:
 What is lost: Aegis no longer notices an anomaly by itself between alerts. A
 deployment that needs that guarantee must run its own alert source (it already has
 one if it uses Prometheus) or accept the cost of a resident detector (~$30/month for
-one 0.25 vCPU Fargate task plus the awake database).
+one 0.25 vCPU Fargate task ≈ $9 and its public IPv4 ≈ $3.6, plus the always-awake
+database ≈ $44: about $57/month).
 
 ## 3. Cost model (us-west-2)
 
-Measured baseline of the previous stack (Cost Explorer, 2–14 Nov 2026): about
-**$3.1/day ≈ $94/month** — ECS $17.8, VPC public IPv4 $12.0, ALB $7.7, RDS $6.6 (MTD,
-partial month), Bedrock $11.3, Secrets Manager $0.4, ECR $0.2.
+Measured baseline of the previous stack (Cost Explorer, 1–15 Nov 2026, 15 days):
+**$56.4 total**, of which infrastructure $45.1 (ECS $17.8, VPC public IPv4 $12.0,
+ALB $7.7, RDS $6.6, Secrets Manager $0.4, ECR $0.2, Route 53 $0.5) and Bedrock
+$11.3. Daily infrastructure spend was a flat ≈ $3.1, so the run-rate is
+**≈ $90/month infrastructure plus ≈ $11–13/month model inference**. The new fixed
+cost below is infrastructure only and is compared against the $90.
 
 Unit prices are the published ones as of this work and are assumptions to re-verify:
 Aurora Serverless v2 $0.12/ACU-h, storage $0.10/GB-month; Fargate $0.04048/vCPU-h and
@@ -104,7 +109,7 @@ API Gateway HTTP $1.00/M; Step Functions Standard $25/M transitions (4,000 free)
 | KMS customer key | 1.00 | |
 | Secrets Manager (RDS master credential) | 0.40 | |
 | ECR (two repos, 10 builds kept) | 0.30–1.00 | |
-| CloudWatch alarms (7) | 0.70 | |
+| CloudWatch alarms (9) | 0.90 | |
 | Recovery sweep wakes (4/day × ~$0.015) | ~1.80 | 0.5 ACU for the 15 min before pausing |
 | Everything else (API Gateway, Lambda, Step Functions, SSM, S3, DynamoDB lock) | ≈0 | pay per use |
 | **Total fixed** | **≈ $4–5** | vs ≈ $94 |
@@ -112,10 +117,10 @@ API Gateway HTTP $1.00/M; Step Functions Standard $25/M transitions (4,000 free)
 | Variable | Cost |
 |---|---|
 | 0 requests, 0 investigations | the fixed total above |
-| API requests | ≈ $0.001 per 100 (gateway $0.0001 + Lambda ≈ $0.0008), plus one database wake of ≈ $0.015 per burst separated by more than 15 minutes |
-| 10 / 100 / 1,000 / 10,000 requests | ≈ $0.015 / $0.016 / $0.02 / $0.09 when they arrive in one burst; up to $0.15 / $1.50 / $1.44/day cap if each lands in its own 15-minute window (96 wakes/day maximum) |
-| One investigation (compute only) | ≈ $0.01–0.03: Fargate 1 vCPU/2 GB ≈ $0.054/h incl. IPv4 for 10–25 min, plus ≈ $0.0002 Step Functions |
-| 1 / 10 / 100 investigations (compute) | ≈ $0.03 / $0.30 / $3.00 |
+| API requests | ≈ $0.0026 per 100 at the ≈ 1 s warm latency measured (1.5 GB × 1 s Lambda ≈ $0.000025 + gateway $0.000001 each), plus one database wake of ≈ $0.015 per burst separated by more than 15 minutes |
+| 10 / 100 / 1,000 / 10,000 requests | ≈ $0.015 / $0.018 / $0.04 / $0.28 when they arrive in one burst; if every request lands in its own 15-minute window the wake dominates: ≈ $0.15 / $1.50 / capped at $1.44 per day (96 wakes) |
+| One investigation (compute) | ≈ $0.03–0.10: Fargate 1 vCPU/2 GB ≈ $0.054/h incl. IPv4 for 10–25 min (≈ $0.01–0.02), the database awake for the run plus the 15-minute pause delay (≈ $0.02–0.08), ≈ $0.0002 Step Functions |
+| 1 / 10 / 100 investigations (compute) | ≈ $0.06 / $0.60 / $6 (investigations that overlap share one database wake, so 100 is an upper bound) |
 | Model inference | not changed by this migration; previous spend was $11–13/month. Budget ≈ $0.3 per investigation at 50k input / 8k output tokens on Sonnet 4.6 (assumption — re-measure from Bedrock usage) |
 
 Hard bounds that cap spend even under abuse: API Gateway 5 req/s steady, 10 burst
@@ -165,7 +170,21 @@ rollback window.
 days. A paused cluster resumes on the first connection in about 15 s; the API answers
 `503 DATABASE_RESUMING` with `Retry-After` meanwhile and clients retry.
 
-## 6. Known limitations
+## 6. Residual risks recorded by independent review (not fixed in this change)
+
+| Risk | Why it remains | What to do |
+|---|---|---|
+| One database role (`aegis_app`) serves the API and the worker; both can write every table except `audit_log` and `schema_migrations` | splitting needs a per-table review of what each component legitimately writes | create `aegis_api` and `aegis_worker` roles; the API should not write approvals, policy or lease tables |
+| TLS to Aurora is encrypted but the certificate is not verified (`ssl="require"`) | the RDS CA bundle must be shipped in both images | add the bundle and use `verify-full` |
+| Task definitions and functions run the mutable `:latest` tag; a principal that can push to ECR can change what the migration task and workers run | the release workflow tags every build and moves `latest`; role trust is pinned to the reviewed workflow on `main` | immutable tags plus digest-pinned task definitions |
+| A compromised API Lambda can call `StartExecution` directly, bypassing the in-flight ceiling (application code) | the ceiling is in the claim, not in IAM | alarm on execution count; request an ECS Fargate task quota |
+| Alarm topic has no subscriber unless `alert_email` is set; the e-mail must also be confirmed | cannot be chosen on the operator's behalf | set `alert_email` and confirm the subscription |
+| The first alert after a long quiet period needs a ≈ 19 s cold start plus up to ≈ 15 s database resume, close to the 29 s gateway limit; the sender must retry 5xx | cannot be removed without provisioned concurrency | confirm each alert source retries on 502/503/504 before cutover |
+| The 10-concurrency Lambda quota is shared with other workloads; 5 req/s with a 19 s cold start can in theory need more | quota increase is an AWS support request | request an increase, then reserve 2 for the sweep |
+| In-flight count scans the outbox (small today); a terminal outbox state would let it use an index | not needed at current volume | migration 015 when the table grows |
+| `/health` may touch the database, so an unauthenticated probe can wake Aurora | not yet changed | have monitors call `/health/live` only |
+
+## 7. Known limitations
 
 * Cold start of the API Lambda is long (first request ≈ 19 s: image load, imports, SSM
   read, IAM token, Firebase init); warm requests are ≈ 1 s. Provisioned concurrency

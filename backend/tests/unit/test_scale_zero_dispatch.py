@@ -209,3 +209,19 @@ def test_dualstack_endpoint_is_opt_in() -> None:
     on = Settings(aws_region="us-west-2", aws_dualstack_endpoints=True, otel_traces_enabled=False)
     assert off.dualstack_endpoint("states") is None
     assert on.dualstack_endpoint("states") == "https://states.us-west-2.api.aws"
+
+
+def test_ssm_loader_rejects_names_that_are_not_declared_settings() -> None:
+    # A parameter called PYTHONPATH or LD_PRELOAD must never reach the process.
+    client = _Ssm([{"Name": "/aegis/zero/api/LD_PRELOAD", "Value": "/tmp/x.so"}])
+    with pytest.raises(ConfigError, match="declared setting"):
+        load_ssm_environment(
+            "/aegis/zero/api", region="us-west-2", client=client, allowed={"ALERT_INGEST_TOKEN"}
+        )
+    assert "LD_PRELOAD" not in os.environ
+
+
+def test_ssm_loader_fails_instead_of_silently_truncating() -> None:
+    many = [{"Name": f"/aegis/zero/api/SETTING_{i}", "Value": "v"} for i in range(60)]
+    with pytest.raises(ConfigError, match="too many"):
+        load_ssm_environment("/aegis/zero/api", region="us-west-2", client=_Ssm(many))

@@ -155,14 +155,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
     status = "Enabled"
     filter {}
 
-    transition {
-      days          = 30
-      storage_class = "STANDARD_IA"
-    }
-    transition {
-      days          = 90
-      storage_class = "GLACIER_IR"
-    }
+    # No storage-class transitions: for small objects the 128 KB minimum billable
+    # size and per-object transition fees cost more than they save.
     expiration { days = var.artifact_retention_days }
     noncurrent_version_expiration { noncurrent_days = 30 }
     abort_incomplete_multipart_upload { days_after_initiation = 7 }

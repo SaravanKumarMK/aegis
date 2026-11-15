@@ -9,7 +9,7 @@ recovery sweep drains whatever is still pending.
 from __future__ import annotations
 
 import asyncio
-import os
+import uuid
 
 from aegis.core.config import Settings
 from aegis.core.logging import get_logger
@@ -65,6 +65,6 @@ def build_dispatch_kick(settings: Settings, db: Database) -> DispatchKick | None
     )
     return DispatchKick(
         dispatcher,
-        dispatcher_id=f"api-{os.getpid()}",
+        dispatcher_id=f"api-{uuid.uuid4().hex[:12]}",
         timeout_s=settings.dispatch_kick_timeout_s,
     )

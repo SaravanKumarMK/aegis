@@ -57,7 +57,12 @@ async def run_sweep(event: dict[str, Any], *, resume_budget_s: float = 40.0) -> 
     try:
         reaped = await JobQueue(db).reap_stale()
         outbox = DispatchOutbox(db)
-        orphaned = await outbox.recover_orphaned(settings.workflow_dispatch_backend)
+        # After a worker failure the state machine asks for a short window; the
+        # schedule uses the default, long enough for a healthy worker to boot.
+        orphan_after_s = max(60, min(3600, int(event.get('orphan_after_s', 600))))
+        orphaned = await outbox.recover_orphaned(
+            settings.workflow_dispatch_backend, older_than_s=orphan_after_s
+        )
         dispatcher = WorkflowDispatcher(
             outbox,
             build_dispatch_adapter(settings),

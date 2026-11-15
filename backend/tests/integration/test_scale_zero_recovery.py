@@ -258,3 +258,87 @@ async def test_queue_depth_counts_waiting_and_running_jobs(
     before = await queue.queue_depth()
     assert await queue.enqueue(incident_id=clean_incident, kind="depth_test") is not None
     assert await queue.queue_depth() == before + 1
+
+
+async def test_job_requeued_while_its_dispatch_is_mid_handoff_is_still_rearmed(
+    db: Database, clean_incident: str
+) -> None:
+    queue = JobQueue(db)
+    outbox = DispatchOutbox(db)
+    job_id = await queue.enqueue(incident_id=clean_incident, kind="rearm_midhandoff")
+    assert job_id is not None
+    # The dispatcher has claimed the row but has not yet recorded the result.
+    record = await outbox.claim("dispatcher-a", "postgres")
+    while record is not None and record.job_id != job_id:
+        record = await outbox.claim("dispatcher-a", "postgres")
+    assert record is not None
+    claimed = await queue.claim("worker-a", kinds=["rearm_midhandoff"])
+    assert claimed is not None
+    assert await queue.release_own("worker-a") == 1
+
+    row = await _outbox(db, job_id)
+    assert row["status"] == "pending" and row["generation"] == 1
+    # The late result of the old hand-off is refused by lease fencing.
+    assert not await outbox.mark_dispatched(
+        record.id, "late", dispatcher_id="dispatcher-a", lease_version=record.lease_version
+    )
+    assert (await _outbox(db, job_id))["status"] == "pending"
+
+
+async def test_exhausted_dispatch_is_recovered_not_stranded(
+    db: Database, clean_incident: str
+) -> None:
+    queue = JobQueue(db)
+    outbox = DispatchOutbox(db)
+    job_id = await queue.enqueue(incident_id=clean_incident, kind="failed_dispatch")
+    assert job_id is not None
+    await db.execute(
+        "UPDATE workflow_dispatch_outbox SET status='failed', attempts=5, "
+        "updated_at=now()-interval '20 minutes' WHERE job_id=$1",
+        job_id,
+    )
+
+    assert await outbox.recover_orphaned("postgres") >= 1
+    row = await _outbox(db, job_id)
+    assert row["status"] == "pending" and row["generation"] == 1
+
+
+async def test_parking_at_the_ceiling_leaves_an_audit_record(
+    db: Database, clean_incident: str
+) -> None:
+    queue = JobQueue(db)
+    job_id = await queue.enqueue(incident_id=clean_incident, kind="park_audit")
+    assert job_id is not None
+    await _dispatch_once(db, job_id)
+    await db.execute(
+        "UPDATE workflow_dispatch_outbox SET generation=25 WHERE job_id=$1", job_id
+    )
+    claimed = await queue.claim("worker-a", kinds=["park_audit"])
+    assert claimed is not None
+    assert await queue.release_own("worker-a") == 1
+
+    assert (await _outbox(db, job_id))["status"] == "failed"
+    audit = await db.fetchval(
+        "SELECT count(*) FROM audit_log WHERE resource_id=$1 AND event_type='workflow.job_parked'",
+        job_id,
+    )
+    assert audit == 1
+
+
+async def test_dispatch_is_not_claimed_for_a_job_that_is_no_longer_waiting(
+    db: Database, clean_incident: str
+) -> None:
+    queue = JobQueue(db)
+    job_id = await queue.enqueue(incident_id=clean_incident, kind="gone_job")
+    assert job_id is not None
+    await db.execute("UPDATE workflow_jobs SET status='cancelled' WHERE id=$1", job_id)
+
+    outbox = DispatchOutbox(db)
+    seen: list[str] = []
+    while (record := await outbox.claim("dispatcher-x", "postgres")) is not None:
+        seen.append(record.job_id)
+        await outbox.mark_failed(
+            record.id, "cleanup", retry_in_s=3600, dispatcher_id="dispatcher-x",
+            lease_version=record.lease_version,
+        )
+    assert job_id not in seen

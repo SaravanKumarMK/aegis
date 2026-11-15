@@ -3,8 +3,9 @@
 # Manual by design (workflow_dispatch only, a protected Environment): the
 # infrastructure is applied with Terraform separately and reviewed, and this
 # workflow can only publish images, repoint the two Lambda functions and run the
-# one-off migration task. Its role cannot change infrastructure, IAM, secrets or
-# the database.
+# one-off migration task. Its role cannot change infrastructure, IAM or secrets;
+# the migration task does run the pushed image as the database owner, which is why
+# this workflow is main-only and its role trusts only this workflow file on main.
 #
 # Order matters: the migration runs on the NEW image before the functions serve
 # it, and never as a side effect of a Lambda cold start.
