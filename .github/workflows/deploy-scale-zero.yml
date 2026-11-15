@@ -30,10 +30,21 @@ env:
 
 jobs:
   release:
+    # Production-affecting and credentialed: only from main. The scale-zero
+    # Environment also restricts deployment branches to main, and its OIDC
+    # subject is environment-scoped, so another ref cannot assume the role.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: scale-zero
     timeout-minutes: 45
     steps:
+      - name: Validate image tag
+        env:
+          TAG: ${{ inputs.image_tag || github.sha }}
+        run: |
+          # A tag becomes an ECR reference and a shell argument below.
+          [[ "$TAG" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { echo "::error::invalid image tag"; exit 1; }
+
       - uses: actions/checkout@v4
 
       - uses: aws-actions/configure-aws-credentials@v4
