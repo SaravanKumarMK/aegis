@@ -127,6 +127,7 @@ class Worker:
         self.stop_when_idle = stop_when_idle
         self._monotonic = time.monotonic
         self._stopping = asyncio.Event()
+        self._renew_stop = asyncio.Event()
         self._inflight: set[asyncio.Task[Any]] = set()
         self._deadline: float | None = None
         self._settings = get_settings()
@@ -172,14 +173,21 @@ class Worker:
         # to a previous incarnation that was killed mid-step.
         await JobQueue(self._db).reclaim_own(self.worker_id)
 
+        # Lease renewal must outlive the poll loop: a bounded worker stops
+        # claiming as soon as it has its job but keeps working on it, and a lapsed
+        # lease would let the reaper hand a live job to a second worker.
+        self._renew_stop = asyncio.Event()
         reaper = asyncio.create_task(self._reap_loop())
         try:
             await self._poll_loop()
         finally:
-            reaper.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reaper
-            await self._shutdown()
+            try:
+                await self._shutdown()
+            finally:
+                self._renew_stop.set()
+                reaper.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reaper
 
     def request_stop(self) -> None:
         log.info("shutdown requested; finishing in-flight work")
@@ -188,9 +196,19 @@ class Worker:
     async def _shutdown(self) -> None:
         if self._inflight:
             log.info("draining", jobs=len(self._inflight))
-            drain_timeout = DRAIN_TIMEOUT_S
-            if self._deadline is not None:
-                drain_timeout = min(drain_timeout, max(0.0, self._deadline - self._monotonic()))
+            remaining = (
+                None if self._deadline is None else max(0.0, self._deadline - self._monotonic())
+            )
+            if self._stopping.is_set():
+                # Asked to stop (SIGTERM/Spot): the platform's grace period rules.
+                drain_timeout = DRAIN_TIMEOUT_S if remaining is None else min(
+                    DRAIN_TIMEOUT_S, remaining
+                )
+            else:
+                # Planned exit after claiming its job limit: the job is the work, so
+                # let it use the whole time budget instead of being cancelled and
+                # restarted from its checkpoint every 90 seconds.
+                drain_timeout = DRAIN_TIMEOUT_S if remaining is None else remaining
             _done, pending = await asyncio.wait(self._inflight, timeout=drain_timeout)
             if pending:
                 # Out of time (ECS stops a task 120 s after SIGTERM, Spot gives
@@ -223,7 +241,7 @@ class Worker:
         """
         queue = JobQueue(self._db)
         tick = 0
-        while not self._stopping.is_set():
+        while not self._renew_stop.is_set():
             try:
                 await queue.renew(self.worker_id)
                 if tick % REAP_EVERY_TICKS == 0:
@@ -232,7 +250,7 @@ class Worker:
                 log.warning("job lease maintenance failed", error=str(exc))
             tick += 1
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stopping.wait(), timeout=RENEW_INTERVAL_S)
+                await asyncio.wait_for(self._renew_stop.wait(), timeout=RENEW_INTERVAL_S)
 
     async def _poll_loop(self) -> None:
         queue = JobQueue(self._db)

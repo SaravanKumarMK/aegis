@@ -75,3 +75,45 @@ def test_worker_cli_cannot_raise_agent_budgets() -> None:
     assert "--max-jobs" in options
     assert "--max-seconds" in options
     assert not any("budget" in option or "token" in option or "llm" in option for option in options)
+
+
+async def _recorded_drain_timeout(
+    monkeypatch: pytest.MonkeyPatch, *, stopping: bool, deadline: float | None
+) -> float | None:
+    seen: list[float | None] = []
+
+    async def fake_wait(  # noqa: ASYNC109 - mirrors asyncio.wait's signature
+        tasks: Any, timeout: float | None = None
+    ) -> tuple[set[Any], set[Any]]:
+        seen.append(timeout)
+        return set(tasks), set()
+
+    class Container:
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(worker_main.asyncio, "wait", fake_wait)
+    worker = bare_worker(max_jobs=1, max_seconds=deadline)
+    worker._inflight = {object()}
+    worker._horizon = None
+    worker._container = Container()
+    if stopping:
+        worker._stopping.set()
+    await worker._shutdown()
+    return seen[0]
+
+
+@pytest.mark.asyncio
+async def test_planned_exit_lets_the_claimed_job_use_the_whole_time_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: a --once worker used to cancel its only job after 90 s and hand
+    # it back, so every investigation restarted from its checkpoint each lap.
+    assert await _recorded_drain_timeout(monkeypatch, stopping=False, deadline=3000) == 3000
+
+
+@pytest.mark.asyncio
+async def test_a_stop_signal_is_still_bounded_by_the_platform_grace_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert await _recorded_drain_timeout(monkeypatch, stopping=True, deadline=3000) == 90.0
