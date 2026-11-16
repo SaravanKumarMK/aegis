@@ -6,7 +6,7 @@
 # through Mangum; the sweep function overrides it with
 # aegis.worker.sweep_lambda.handler. Migrations are NOT run here: they are a
 # separate one-off ECS task, never a cold-start side effect.
-FROM public.ecr.aws/lambda/python:3.12
+FROM public.ecr.aws/lambda/python:3.15
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
