@@ -36,6 +36,7 @@ from aegis.core.logging import (
     configure_logging,
     get_logger,
 )
+from aegis.core.ssm_env import bootstrap_environment
 from aegis.domain.enums import IncidentState
 from aegis.persistence.db import Database
 from aegis.persistence.incidents import IncidentRepository
@@ -126,6 +127,7 @@ class Worker:
         self.stop_when_idle = stop_when_idle
         self._monotonic = time.monotonic
         self._stopping = asyncio.Event()
+        self._renew_stop = asyncio.Event()
         self._inflight: set[asyncio.Task[Any]] = set()
         self._deadline: float | None = None
         self._settings = get_settings()
@@ -152,7 +154,8 @@ class Worker:
         )
 
         await self._container.connect()
-        await run_migrations(self._db)
+        if s.worker_run_migrations:
+            await run_migrations(self._db)
 
         unavailable = [
             name for name, cap in self._container.capabilities.items() if not cap.configured
@@ -170,14 +173,21 @@ class Worker:
         # to a previous incarnation that was killed mid-step.
         await JobQueue(self._db).reclaim_own(self.worker_id)
 
+        # Lease renewal must outlive the poll loop: a bounded worker stops
+        # claiming as soon as it has its job but keeps working on it, and a lapsed
+        # lease would let the reaper hand a live job to a second worker.
+        self._renew_stop = asyncio.Event()
         reaper = asyncio.create_task(self._reap_loop())
         try:
             await self._poll_loop()
         finally:
-            reaper.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reaper
-            await self._shutdown()
+            try:
+                await self._shutdown()
+            finally:
+                self._renew_stop.set()
+                reaper.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reaper
 
     def request_stop(self) -> None:
         log.info("shutdown requested; finishing in-flight work")
@@ -186,9 +196,19 @@ class Worker:
     async def _shutdown(self) -> None:
         if self._inflight:
             log.info("draining", jobs=len(self._inflight))
-            drain_timeout = DRAIN_TIMEOUT_S
-            if self._deadline is not None:
-                drain_timeout = min(drain_timeout, max(0.0, self._deadline - self._monotonic()))
+            remaining = (
+                None if self._deadline is None else max(0.0, self._deadline - self._monotonic())
+            )
+            if self._stopping.is_set():
+                # Asked to stop (SIGTERM/Spot): the platform's grace period rules.
+                drain_timeout = DRAIN_TIMEOUT_S if remaining is None else min(
+                    DRAIN_TIMEOUT_S, remaining
+                )
+            else:
+                # Planned exit after claiming its job limit: the job is the work, so
+                # let it use the whole time budget instead of being cancelled and
+                # restarted from its checkpoint every 90 seconds.
+                drain_timeout = DRAIN_TIMEOUT_S if remaining is None else remaining
             _done, pending = await asyncio.wait(self._inflight, timeout=drain_timeout)
             if pending:
                 # Out of time (ECS stops a task 120 s after SIGTERM, Spot gives
@@ -199,7 +219,7 @@ class Worker:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
                 try:
-                    released = await JobQueue(self._db).reclaim_own(self.worker_id)
+                    released = await JobQueue(self._db).release_own(self.worker_id)
                     log.warning("released unfinished jobs on shutdown", jobs=released)
                 except Exception as exc:  # noqa: BLE001 - shutdown must continue
                     log.exception(
@@ -221,7 +241,7 @@ class Worker:
         """
         queue = JobQueue(self._db)
         tick = 0
-        while not self._stopping.is_set():
+        while not self._renew_stop.is_set():
             try:
                 await queue.renew(self.worker_id)
                 if tick % REAP_EVERY_TICKS == 0:
@@ -230,7 +250,7 @@ class Worker:
                 log.warning("job lease maintenance failed", error=str(exc))
             tick += 1
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stopping.wait(), timeout=RENEW_INTERVAL_S)
+                await asyncio.wait_for(self._renew_stop.wait(), timeout=RENEW_INTERVAL_S)
 
     async def _poll_loop(self) -> None:
         queue = JobQueue(self._db)
@@ -249,6 +269,10 @@ class Worker:
                 job = await queue.claim(
                     self.worker_id,
                     kinds=["investigate", "execute_action", "horizon_resume"],
+                    # A job belongs to the orchestrator that dispatched it. Without
+                    # this a Step Functions worker looks for 'postgres' jobs, finds
+                    # none and exits, stranding the job it was started for.
+                    dispatch_destination=self._settings.workflow_dispatch_backend,
                 )
             except Exception as exc:  # noqa: BLE001
                 # A database blip must not kill the worker; back off and retry.
@@ -635,6 +659,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 async def _main() -> None:
+    bootstrap_environment()
     args = parser().parse_args()
 
     max_jobs = 1 if args.once else args.max_jobs

@@ -62,6 +62,10 @@ locals {
   origin_request_all_viewer     = "216adef6-5c7f-47e4-b989-5492eafa07d3"
 }
 
+# Reviewed: a WAF adds a monthly fee plus per-rule and per-request charges that
+# exceed this demo's whole budget; this environment is being replaced by the
+# scale-to-zero stack. See docs/scale-zero-runbook.md.
+#trivy:ignore:AWS-0011
 resource "aws_cloudfront_distribution" "api" {
   enabled         = true
   comment         = "Aegis hackathon API (backend only; the frontend is on Vercel)"

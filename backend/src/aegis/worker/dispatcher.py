@@ -12,6 +12,7 @@ import time
 from aegis.container import build_container
 from aegis.core.config import get_settings
 from aegis.core.logging import configure_logging, get_logger
+from aegis.core.ssm_env import bootstrap_environment
 from aegis.persistence.dispatch_outbox import DispatchOutbox
 from aegis.persistence.migrate import run_migrations
 from aegis.worker.dispatch import WorkflowDispatcher, build_dispatch_adapter
@@ -20,6 +21,7 @@ log = get_logger(__name__)
 
 
 async def _run(args: argparse.Namespace) -> None:
+    bootstrap_environment()
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
     container = build_container(settings)
@@ -31,9 +33,12 @@ async def _run(args: argparse.Namespace) -> None:
 
     await container.connect()
     try:
-        await run_migrations(container.db)
+        if settings.worker_run_migrations:
+            await run_migrations(container.db)
         dispatcher = WorkflowDispatcher(
-            DispatchOutbox(container.db), build_dispatch_adapter(settings)
+            DispatchOutbox(container.db),
+            build_dispatch_adapter(settings),
+            max_in_flight=settings.workflow_max_in_flight,
         )
         deadline = time.monotonic() + args.max_seconds if args.max_seconds else None
         while not stop.is_set():

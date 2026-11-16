@@ -37,6 +37,16 @@ resource "aws_rds_cluster_parameter_group" "this" {
   }
 }
 
+# RDS creates this group on first export with no expiry; owning it here makes
+# retention finite and keeps log storage out of the idle bill.
+#checkov:skip=CKV_AWS_158:The data key's default policy does not grant CloudWatch Logs; log content is covered by finite retention and IAM.
+resource "aws_cloudwatch_log_group" "aurora_postgresql" {
+  #checkov:skip=CKV_AWS_158:The data key's default policy does not grant CloudWatch Logs; log content is covered by finite retention and IAM.
+  name              = "/aws/rds/cluster/${local.name}-postgres/postgresql"
+  retention_in_days = var.log_retention_days
+  tags              = { Name = "${local.name}-aurora-postgresql" }
+}
+
 #checkov:skip=CKV2_AWS_8:Native Aurora backups are retained; centralized AWS Backup is a deployment-gate decision.
 resource "aws_rds_cluster" "this" {
   #checkov:skip=CKV2_AWS_8:Native Aurora backups are retained; centralized AWS Backup is a deployment-gate decision.
@@ -67,6 +77,8 @@ resource "aws_rds_cluster" "this" {
     seconds_until_auto_pause = var.aurora_auto_pause_seconds
   }
 
+  depends_on = [aws_cloudwatch_log_group.aurora_postgresql]
+
   lifecycle {
     precondition {
       condition     = var.aurora_min_acu == 0
@@ -80,17 +92,19 @@ resource "aws_rds_cluster" "this" {
 # Exactly one writer. Readers and RDS Proxy are intentionally absent: both add
 # idle cost and a proxy prevents a paused database from being genuinely idle.
 resource "aws_rds_cluster_instance" "writer" {
-  identifier                      = "${local.name}-postgres-writer"
-  cluster_identifier              = aws_rds_cluster.this.id
-  instance_class                  = "db.serverless"
-  engine                          = aws_rds_cluster.this.engine
-  engine_version                  = aws_rds_cluster.this.engine_version
-  publicly_accessible             = false
-  auto_minor_version_upgrade      = true
-  performance_insights_enabled    = true
-  performance_insights_kms_key_id = aws_kms_key.data.arn
-  monitoring_interval             = 60
-  monitoring_role_arn             = aws_iam_role.rds_monitoring.arn
+  identifier                 = "${local.name}-postgres-writer"
+  cluster_identifier         = aws_rds_cluster.this.id
+  instance_class             = "db.serverless"
+  engine                     = aws_rds_cluster.this.engine
+  engine_version             = aws_rds_cluster.this.engine_version
+  publicly_accessible        = false
+  auto_minor_version_upgrade = true
+  # Performance Insights and Enhanced Monitoring are deliberately off. AWS
+  # recommends 2 ACU minimum for Performance Insights, they stop collecting
+  # while paused anyway, and toggling them resumes the instance. CloudWatch
+  # ServerlessDatabaseCapacity is the idle-state evidence this design needs.
+  performance_insights_enabled = false
+  monitoring_interval          = 0
 }
 
 #checkov:skip=CKV_AWS_18:Access logging needs the Phase 4 logging destination and finite-retention policy.
@@ -141,14 +155,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
     status = "Enabled"
     filter {}
 
-    transition {
-      days          = 30
-      storage_class = "STANDARD_IA"
-    }
-    transition {
-      days          = 90
-      storage_class = "GLACIER_IR"
-    }
+    # No storage-class transitions: for small objects the 128 KB minimum billable
+    # size and per-object transition fees cost more than they save.
     expiration { days = var.artifact_retention_days }
     noncurrent_version_expiration { noncurrent_days = 30 }
     abort_incomplete_multipart_upload { days_after_initiation = 7 }
@@ -181,14 +189,9 @@ resource "aws_s3_bucket_policy" "artifacts" {
   policy = data.aws_iam_policy_document.artifacts.json
 }
 
-# Containers only: secret values are populated out-of-band so neither source,
-# plan output nor Terraform state can contain credentials.
-#checkov:skip=CKV2_AWS_57:Values and rotation Lambdas are intentionally created outside this container-only foundation.
-resource "aws_secretsmanager_secret" "application" {
-  #checkov:skip=CKV2_AWS_57:Values and rotation Lambdas are intentionally created outside this container-only foundation.
-  for_each                = toset(["alert-ingest-token", "firebase-service-account", "llm-provider-key"])
-  name                    = "${local.name}/${each.value}"
-  recovery_window_in_days = 30
-  kms_key_id              = aws_kms_key.data.arn
-  tags                    = { Name = "${local.name}-${each.value}" }
-}
+# Runtime secrets are SSM SecureString parameters under /<name>/ (alert ingest
+# token, LLM keys), encrypted with the key above and written out-of-band so
+# neither source, plan output nor Terraform state can contain credentials.
+# Standard parameters cost nothing; Secrets Manager would add $0.40 per secret
+# per month for rotation this design does not use. Only the RDS-managed master
+# credential (migration task) stays in Secrets Manager, as RDS requires.

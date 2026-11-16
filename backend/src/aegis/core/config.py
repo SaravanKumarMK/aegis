@@ -67,9 +67,18 @@ class Settings(BaseSettings):
     postgres_db: str = "aegis"
     postgres_user: str = "aegis"
     postgres_password: SecretStr = SecretStr("")
-    postgres_pool_min: Positive = 2
+    # 0 lets a scale-to-zero API hold no connection while idle, so a frozen Lambda
+    # cannot keep Aurora awake.
+    postgres_pool_min: Annotated[int, Field(ge=0)] = 2
     postgres_pool_max: Positive = 16
     postgres_statement_timeout_ms: Positive = 15_000
+    # Server-side close of idle sessions (0 = off). A frozen Lambda cannot run the
+    # pool's own idle timer, so the database must end the session instead.
+    postgres_idle_session_timeout_ms: Annotated[int, Field(ge=0)] = 0
+    # Per-connection connect timeout. A paused Aurora cluster resumes in about
+    # 15 s; failing fast turns that into a typed "resuming" response instead of
+    # a request that outlives the API gateway's integration timeout.
+    postgres_connect_timeout_s: float = Field(default=10.0, gt=0, le=60)
 
     # --- durable workflow dispatch ---
     # Postgres preserves today's worker path. Step Functions is opt-in until
@@ -78,6 +87,20 @@ class Settings(BaseSettings):
     step_functions_state_machine_arn: str = ""
     workflow_dispatch_timeout_s: float = Field(default=10.0, gt=0, le=60)
     workflow_dispatch_attempts: Annotated[int, Field(ge=1, le=5)] = 3
+    # Hard ceilings that bound cost: concurrent dispatched workers, and how many
+    # jobs may wait before new incidents are refused with 429 (deduplicated
+    # alerts still attach, so an alert storm cannot grow either number).
+    workflow_max_in_flight: Annotated[int, Field(ge=1, le=50)] = 5
+    workflow_max_queued_jobs: Annotated[int, Field(ge=1, le=10_000)] = 200
+    # How long an API request waits to hand a committed job to the orchestrator.
+    # A miss is safe: the outbox row stays pending and the recovery sweep owns it.
+    dispatch_kick_timeout_s: float = Field(default=4.0, gt=0, le=15)
+    # Bounded workers and the dispatcher skip migrations when a one-off job owns them.
+    worker_run_migrations: bool = True
+    # Aurora IAM authentication: no database password to store or rotate.
+    postgres_iam_auth: bool = False
+    # Reach AWS APIs over IPv6 (the scale-zero VPC has no NAT gateway).
+    aws_dualstack_endpoints: bool = False
 
     # --- redis (soft) ---
     redis_host: str = "redis"
@@ -309,6 +332,12 @@ class Settings(BaseSettings):
         auth = f":{pw}@" if pw else ""
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
+    def dualstack_endpoint(self, service: str) -> str | None:
+        """``https://<service>.<region>.api.aws`` when IPv6-only egress is in use."""
+        if not self.aws_dualstack_endpoints:
+            return None
+        return f"https://{service}.{self.aws_region}.api.aws"
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
@@ -487,8 +516,8 @@ class Settings(BaseSettings):
             problems.append("alert_ingest_token is required in production")
         if not self.firebase_project_id:
             problems.append("firebase_project_id is required in production")
-        if not self.postgres_password.get_secret_value():
-            problems.append("postgres_password is required in production")
+        if not self.postgres_password.get_secret_value() and not self.postgres_iam_auth:
+            problems.append("postgres_password (or postgres_iam_auth) is required in production")
         if problems:
             raise ValueError("; ".join(problems))
         return self

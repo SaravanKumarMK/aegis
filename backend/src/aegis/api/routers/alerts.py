@@ -19,10 +19,12 @@ from pydantic import BaseModel, Field
 
 from aegis.api.deps import IncidentsDep, SettingsDep
 from aegis.api.security import verify_ingest_token
+from aegis.core.errors import RateLimited
 from aegis.core.ids import correlation_id
 from aegis.core.logging import get_logger
 from aegis.domain.enums import Severity
 from aegis.persistence.jobs import JobQueue
+from aegis.worker.kick import kick_dispatch
 
 log = get_logger(__name__)
 router = APIRouter(tags=["ingestion"])
@@ -97,6 +99,15 @@ async def ingest_alert(
                 correlation_id=cid,
             )
 
+        # Queue-depth ceiling, checked only for a genuinely new incident: dedup
+        # above has already attached repeats, so a storm of one alert is free
+        # and a storm of distinct alerts is refused rather than billed.
+        if await jobs.queue_depth() >= settings.workflow_max_queued_jobs:
+            raise RateLimited(
+                "investigation queue is full; retry later",
+                context={"limit": settings.workflow_max_queued_jobs},
+            )
+
         incident = await incidents.create(
             title=alert.title,
             severity=alert.severity,
@@ -148,6 +159,9 @@ async def ingest_alert(
             payload={"trigger": "alert", "alert_id": alert_id},
             conn=conn,
         )
+
+    if job_id is not None:
+        await kick_dispatch(request.app.state)
 
     log.info(
         "incident opened",

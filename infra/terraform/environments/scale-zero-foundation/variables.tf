@@ -1,13 +1,13 @@
 variable "aws_region" {
   description = "AWS region for the scale-zero environment."
   type        = string
-  default     = "us-east-1"
+  default     = "us-west-2"
 }
 
 variable "availability_zones" {
   description = "Exactly two AZs in aws_region. Explicit input makes an offline plan deterministic."
   type        = list(string)
-  default     = ["us-east-1a", "us-east-1b"]
+  default     = ["us-west-2a", "us-west-2b"]
 
   validation {
     condition     = length(var.availability_zones) == 2 && alltrue([for az in var.availability_zones : startswith(az, var.aws_region)])
@@ -33,9 +33,9 @@ variable "vpc_cidr" {
 }
 
 variable "aurora_engine_version" {
-  description = "Aurora PostgreSQL release that supports Serverless v2 auto-pause in the target region."
+  description = "Aurora PostgreSQL release that supports Serverless v2 auto-pause (16.3+) in the target region. Verify with describe-db-engine-versions: us-west-2 has no plain 16.4."
   type        = string
-  default     = "16.4"
+  default     = "16.11"
 }
 
 variable "aurora_min_acu" {

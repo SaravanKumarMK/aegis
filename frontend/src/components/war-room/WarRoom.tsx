@@ -10,6 +10,12 @@ import { STREAM_PATH, warRoomApi } from '@/lib/war-room/api';
 import {
   approvalOpen, initialModel, isSeqEvent, warRoomReducer, type ConnectionState, type WarRoomModel,
 } from '@/lib/war-room/reducer';
+import {
+  openPoll,
+  parseWarRoomPage,
+  pollingEnabled,
+  type PollOptions,
+} from '@/lib/war-room/poll';
 import { openStream } from '@/lib/war-room/sse';
 import type { ControlResponse, HealthPayload, WarRoomState } from '@/lib/war-room/types';
 import { AegisMark } from '@/components/shell/AegisMark';
@@ -198,9 +204,23 @@ export function WarRoom() {
         setLoadError(failureText(state.reason));
       }
 
-      close = openStream({
-        path: STREAM_PATH,
-        lastEventId: resumeFrom > 0 ? String(resumeFrom) : null,
+      // A streaming gateway keeps one connection open; a buffering one (API
+      // Gateway HTTP API in the scale-to-zero deployment) is polled for the same
+      // monotonic events, so the reducer sees identical frames either way.
+      const subscribe = (handlers: Pick<PollOptions, 'onFrame' | 'onStatus'>) =>
+        pollingEnabled()
+          ? openPoll({
+              path: (after) => `/v1/war-room/events?after=${after}&limit=500`,
+              parse: parseWarRoomPage,
+              after: resumeFrom,
+              ...handlers,
+            })
+          : openStream({
+              path: STREAM_PATH,
+              lastEventId: resumeFrom > 0 ? String(resumeFrom) : null,
+              ...handlers,
+            });
+      close = subscribe({
         onStatus: (status) => dispatch({ type: 'connection', state: status }),
         onFrame: (frame) => {
           if (frame.event === 'ping') return;

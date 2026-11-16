@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+# Aegis API and dispatch sweep as Lambda container images.
+#
+# Same source, same dependencies and same app object as the service image
+# (Dockerfile); only the entry point differs. The default CMD serves the API
+# through Mangum; the sweep function overrides it with
+# aegis.worker.sweep_lambda.handler. Migrations are NOT run here: they are a
+# separate one-off ECS task, never a cold-start side effect.
+FROM public.ecr.aws/lambda/python:3.12
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    AEGIS_FIXTURES_DIR=/app/tests/fixtures
+
+WORKDIR /build
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install . && rm -rf /build
+
+# The package is installed into site-packages, so the files it reads at run
+# time are named explicitly (same layout as the service image).
+WORKDIR /app
+COPY migrations ./migrations
+COPY tests/fixtures ./tests/fixtures
+
+# Lambda runs the function unprivileged regardless; stating it also keeps image
+# scanners honest. The installed packages and /app are world-readable.
+USER 10001
+
+CMD ["aegis.api.lambda_handler.handler"]

@@ -208,10 +208,16 @@ class JobQueue:
 
         Without this a hard-killed worker would leave its job 'running' forever.
         """
+        # A job whose attempts are spent is parked, not requeued: with
+        # per-job Fargate workers a crash loop would otherwise be an unbounded bill.
         result = await self._db.execute(
             """
             UPDATE workflow_jobs
-               SET status='queued', locked_by=NULL, locked_at=NULL, updated_at=now()
+               SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+                   last_error = CASE WHEN attempts >= max_attempts
+                                     THEN 'lease expired after the final attempt'
+                                     ELSE last_error END,
+                   locked_by=NULL, locked_at=NULL, updated_at=now()
              WHERE status='running'
                AND locked_at < now() - make_interval(secs => $1)
             """,
@@ -253,7 +259,11 @@ class JobQueue:
         result = await self._db.execute(
             """
             UPDATE workflow_jobs
-               SET status='queued', locked_by=NULL, locked_at=NULL,
+               SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
+                   last_error = CASE WHEN attempts >= max_attempts
+                                     THEN 'worker restarted after the final attempt'
+                                     ELSE last_error END,
+                   locked_by=NULL, locked_at=NULL,
                    run_after=now(), updated_at=now()
              WHERE status='running' AND locked_by = $1
             """,
@@ -267,6 +277,34 @@ class JobQueue:
                 count=count,
             )
         return count
+
+    async def release_own(self, worker_id: str) -> int:
+        """Hand back unfinished jobs at a planned stop (time slice or drain).
+
+        Unlike ``reclaim_own`` this is not a crash: the checkpoint is current, so
+        the attempt is refunded and a long investigation can span many
+        time-bounded workers without exhausting ``max_attempts``.
+        """
+        result = await self._db.execute(
+            """
+            UPDATE workflow_jobs
+               SET status='queued', locked_by=NULL, locked_at=NULL,
+                   attempts = GREATEST(attempts - 1, 0),
+                   run_after=now(), updated_at=now()
+             WHERE status='running' AND locked_by = $1
+            """,
+            worker_id,
+        )
+        return int(result.split()[-1]) if result.startswith("UPDATE") else 0
+
+    async def queue_depth(self) -> int:
+        """Jobs waiting or running; the figure the queue-depth ceiling bounds."""
+        return int(
+            await self._db.fetchval(
+                "SELECT count(*) FROM workflow_jobs WHERE status IN ('queued','running')"
+            )
+            or 0
+        )
 
     async def stats(self) -> dict[str, int]:
         rows = await self._db.fetch(

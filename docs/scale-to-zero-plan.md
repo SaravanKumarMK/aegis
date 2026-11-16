@@ -22,10 +22,10 @@ are recorded as proposed revisions, not silently applied to those documents.
 | 1 | Durable dispatch and bounded worker | Actual-state workflow audit and product-state contract | `scale-zero/p1-dispatch-worker` | complete |
 | 2 | API on Lambda | Secure entry, auth completion, sample-mode contracts | `scale-zero/p1-dispatch-worker` | complete |
 | 3 | Terraform foundation | Goal-oriented shell, responsive navigation, first-run exploration | `scale-zero/p1-dispatch-worker` | complete |
-| 4 | Orchestration and compute | Incident-to-result operational workflows | `scale-zero/p4-tf-orchestration` | not started |
-| 5 | Frontend polling and local E2E | Service graph and cinematic landing experience | `scale-zero/p5-local-e2e` | not started |
-| 6 | Pre-deploy hardening and docs | Route closure, usability, accessibility, security and performance | `scale-zero/p6-predeploy` | not started |
-| Deploy gate | Apply, validate, cut over, deprecate | Production journey validation | none | blocked on phases 1–6 and approval |
+| 4 | Orchestration and compute | Incident-to-result operational workflows | `scale-zero/p4-orchestration` (PR 27) | infrastructure complete and deployed to `us-west-2`; product-workflow slice not started |
+| 5 | Frontend polling and local E2E | Service graph and cinematic landing experience | `scale-zero/p4-orchestration` | polling transport done; graph and landing not started |
+| 6 | Pre-deploy hardening and docs | Route closure, usability, accessibility, security and performance | `scale-zero/p4-orchestration` | independent security/DB/architecture reviews done; Playwright, a11y and performance gates not started |
+| Deploy gate | Apply, validate, cut over, deprecate | Production journey validation | none | stack applied and smoke-tested ([runbook](scale-zero-runbook.md)); frontend cutover and decommission pending |
 
 Update this table in the same commit that finishes a phase.
 

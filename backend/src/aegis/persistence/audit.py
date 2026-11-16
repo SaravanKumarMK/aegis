@@ -39,6 +39,8 @@ class AuditEvent:
     both filter on these, and a typo would silently hide an event from a review.
     """
 
+    WORKFLOW_JOB_PARKED: Final = "workflow.job_parked"
+
     INCIDENT_CREATED: Final = "incident.created"
     INCIDENT_STATE_CHANGED: Final = "incident.state_changed"
     INCIDENT_RESOLVED: Final = "incident.resolved"

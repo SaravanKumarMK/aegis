@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from mangum import Mangum
 
-from aegis.api.app import app
+from aegis.core.ssm_env import bootstrap_environment
+
+# Secrets must be in the environment before the app module builds its settings.
+bootstrap_environment()
+
+from aegis.api.app import app  # noqa: E402 - import order is the point
 
 # Lifespan stays enabled: one warm Lambda execution environment owns one pool
 # and one verifier, exactly as one service process does. Migrations are disabled

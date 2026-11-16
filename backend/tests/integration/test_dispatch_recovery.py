@@ -68,8 +68,9 @@ async def test_stale_dispatch_and_job_are_recoverable_without_losing_checkpoint(
     queue = JobQueue(db)
     job_id = await queue.enqueue(incident_id=clean_incident, kind="recovery_test")
     assert job_id is not None
-    job = await queue.claim("dead-worker", kinds=["recovery_test"])
+    # Real order: the dispatcher hands the job off before a worker claims it.
     dispatch = await DispatchOutbox(db).claim("dead-dispatcher", "postgres")
+    job = await queue.claim("dead-worker", kinds=["recovery_test"])
     assert job is not None and dispatch is not None
 
     run_id = f"run_{job_id}"
@@ -96,7 +97,9 @@ async def test_stale_dispatch_and_job_are_recoverable_without_losing_checkpoint(
     )
 
     assert await queue.reap_stale() >= 1
-    assert await DispatchOutbox(db).recover_stale() >= 1
+    # Reaping the job already re-armed its mid-hand-off dispatch (migration 014), so
+    # the lease sweep has nothing left to do; either path ends with a pending row.
+    await DispatchOutbox(db).recover_stale()
     assert await db.fetchval("SELECT status FROM workflow_jobs WHERE id=$1", job_id) == "queued"
     assert (
         await db.fetchval("SELECT status FROM workflow_dispatch_outbox WHERE id=$1", dispatch.id)

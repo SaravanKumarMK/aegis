@@ -1,0 +1,124 @@
+# Release the scale-to-zero stack: images -> functions -> migration -> smoke.
+#
+# Manual by design (workflow_dispatch only, a protected Environment): the
+# infrastructure is applied with Terraform separately and reviewed, and this
+# workflow can only publish images, repoint the two Lambda functions and run the
+# one-off migration task. Its role cannot change infrastructure, IAM or secrets;
+# the migration task does run the pushed image as the database owner, which is why
+# this workflow is main-only and its role trusts only this workflow file on main.
+#
+# Order matters: the migration runs on the NEW image before the functions serve
+# it, and never as a side effect of a Lambda cold start.
+name: deploy-scale-zero
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag for the build (default: the commit SHA)"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-scale-zero
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.SCALE_ZERO_REGION }}
+
+jobs:
+  release:
+    # Production-affecting and credentialed: only from main. The scale-zero
+    # Environment also restricts deployment branches to main, and its OIDC
+    # subject is environment-scoped, so another ref cannot assume the role.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: scale-zero
+    timeout-minutes: 45
+    steps:
+      - name: Validate image tag
+        env:
+          TAG: ${{ inputs.image_tag || github.sha }}
+        run: |
+          # A tag becomes an ECR reference and a shell argument below.
+          [[ "$TAG" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { echo "::error::invalid image tag"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.SCALE_ZERO_RELEASE_ROLE_ARN }}
+          aws-region: ${{ vars.SCALE_ZERO_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        id: build
+        env:
+          TAG: ${{ inputs.image_tag || github.sha }}
+          BACKEND_REPO: ${{ vars.SCALE_ZERO_BACKEND_REPO }}
+          LAMBDA_REPO: ${{ vars.SCALE_ZERO_LAMBDA_REPO }}
+        run: |
+          set -euo pipefail
+          # --provenance=false: Lambda rejects the manifest list buildx adds by default.
+          docker buildx build --provenance=false --sbom=false --platform linux/amd64 \
+            -f backend/Dockerfile -t "$BACKEND_REPO:$TAG" -t "$BACKEND_REPO:latest" --push backend
+          docker buildx build --provenance=false --sbom=false --platform linux/amd64 \
+            -f backend/Dockerfile.lambda -t "$LAMBDA_REPO:$TAG" -t "$LAMBDA_REPO:latest" --push backend
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Run migrations on the new image
+        env:
+          CLUSTER: ${{ vars.SCALE_ZERO_CLUSTER }}
+          TASK_FAMILY: ${{ vars.SCALE_ZERO_MIGRATE_TASK }}
+          SUBNETS: ${{ vars.SCALE_ZERO_WORKER_SUBNETS }}
+          SECURITY_GROUP: ${{ vars.SCALE_ZERO_WORKER_SECURITY_GROUP }}
+        run: |
+          set -euo pipefail
+          # The task definition references :latest, which was just pushed.
+          arn=$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+            --task-definition "$TASK_FAMILY" \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUP],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$arn"
+          code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$arn" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$code" != "0" ]; then
+            echo "::error::migration task exited with $code"
+            exit 1
+          fi
+
+      - name: Repoint the functions
+        env:
+          LAMBDA_REPO: ${{ vars.SCALE_ZERO_LAMBDA_REPO }}
+          TAG: ${{ steps.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for fn in "${{ vars.SCALE_ZERO_API_FUNCTION }}" "${{ vars.SCALE_ZERO_SWEEP_FUNCTION }}"; do
+            aws lambda update-function-code --function-name "$fn" \
+              --image-uri "$LAMBDA_REPO:$TAG" --query LastUpdateStatus --output text
+            aws lambda wait function-updated --function-name "$fn"
+          done
+
+      - name: Smoke test
+        env:
+          API_URL: ${{ vars.SCALE_ZERO_API_URL }}
+        run: |
+          set -euo pipefail
+          # A cold start or a waking database may answer 503 + Retry-After first.
+          probe() {
+            for attempt in 1 2 3 4 5 6; do
+              status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$@" || true)
+              if [ "$status" != "503" ] && [ "$status" != "000" ]; then echo "$status"; return; fi
+              sleep 15
+            done
+            echo "$status"
+          }
+          test "$(probe "$API_URL/health/live")" = "200"
+          # The auth boundary must still be closed.
+          test "$(probe "$API_URL/v1/incidents")" = "401"
+          test "$(probe -X POST -H 'content-type: application/json' -d '{}' "$API_URL/v1/alerts")" != "202"

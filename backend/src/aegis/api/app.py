@@ -42,10 +42,11 @@ from aegis.api.routers import (
 )
 from aegis.container import build_container
 from aegis.core.config import Settings, get_settings
-from aegis.core.errors import AegisError, DatabaseResuming
+from aegis.core.errors import AegisError, DatabaseResuming, RateLimited
 from aegis.core.ids import correlation_id
 from aegis.core.logging import bind_correlation_id, configure_logging, get_logger
 from aegis.persistence.migrate import run_migrations
+from aegis.worker.kick import build_dispatch_kick
 
 log = get_logger(__name__)
 
@@ -76,6 +77,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # worker owns the write side of all three.
     app.state.horizon_store = container.horizon_store
     app.state.brain = container.brain
+    # None unless an external orchestrator is configured; routers call it after
+    # committing a job so a scale-to-zero deployment wakes its worker immediately.
+    app.state.dispatch_kick = build_dispatch_kick(settings, container.db)
 
     try:
         await container.connect()
@@ -184,6 +188,8 @@ def create_app() -> FastAPI:
         headers = {"X-Correlation-ID": cid}
         if isinstance(exc, DatabaseResuming):
             headers["Retry-After"] = str(settings.database_resume_retry_after_s)
+        elif isinstance(exc, RateLimited):
+            headers["Retry-After"] = "60"
         return JSONResponse(
             status_code=exc.http_status,
             content={"error": exc.to_dict(), "correlation_id": cid},
